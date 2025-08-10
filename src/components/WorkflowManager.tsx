@@ -5,6 +5,59 @@ import { WorkflowManifest, WorkflowResponse, ArgoClientError } from '../types/ar
 // Initialize with empty baseUrl to use the proxy in package.json
 const argoClient = new ArgoApiClient();
 
+// Helpers to sort nodes by DAG dependency order
+function getDagOrderMap(wf: WorkflowResponse): Map<string, number> | null {
+  try {
+    const entryName = wf?.spec?.entrypoint;
+    if (!entryName || !wf?.spec?.templates) return null;
+    const tpl = wf.spec.templates.find(t => t.name === entryName);
+    const dagTasks = tpl?.dag?.tasks;
+    if (!dagTasks || dagTasks.length === 0) return null;
+
+    // Build graph from dependencies
+    const names = Array.from(new Set(dagTasks.map(t => t.name)));
+    const indeg: Record<string, number> = {};
+    const adj: Record<string, string[]> = {};
+    names.forEach(n => { indeg[n] = 0; adj[n] = []; });
+    for (const t of dagTasks) {
+      const deps = t.dependencies || [];
+      for (const d of deps) {
+        if (!(d in adj)) { adj[d] = []; if (!(d in indeg)) indeg[d] = 0; }
+        adj[d].push(t.name);
+        indeg[t.name] = (indeg[t.name] ?? 0) + 1;
+      }
+      if (!(t.name in indeg)) indeg[t.name] = indeg[t.name] ?? 0;
+    }
+
+    // Kahn's algorithm for topological order
+    const q: string[] = Object.keys(indeg).filter(k => indeg[k] === 0).sort();
+    const order: string[] = [];
+    while (q.length) {
+      const n = q.shift()!;
+      order.push(n);
+      for (const v of adj[n] || []) {
+        indeg[v] -= 1;
+        if (indeg[v] === 0) q.push(v);
+      }
+      q.sort();
+    }
+
+    // Map task name -> index
+    const map = new Map<string, number>();
+    order.forEach((n, i) => map.set(n, i));
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+function baseTaskNameFromNode(node: any): string {
+  const raw = (node?.displayName || node?.name || '').toString();
+  // strip loop suffix like task-a(0) or task-a (0)
+  const m = raw.match(/^\s*([^\(]+)\s*(?:\(.*\))?\s*$/);
+  return (m && m[1]) ? m[1].trim() : raw;
+}
+
 const sampleWorkflowManifest: WorkflowManifest = {
   apiVersion: 'argoproj.io/v1alpha1',
   kind: 'Workflow',
@@ -92,36 +145,7 @@ const WorkflowManager: React.FC = () => {
   const [namespace, setNamespace] = useState<string>('argo');
   const [workflowToSubmit, setWorkflowToSubmit] = useState<string>(JSON.stringify(sampleWorkflowManifest, null, 2));
   const [taskOutputs, setTaskOutputs] = useState<{ [taskName: string]: string }>({});
-  const [connectionStatus, setConnectionStatus] = useState<string>('');
-  const [isConnected, setIsConnected] = useState<boolean>(false);
-
-  const testConnection = async () => {
-    setLoading(true);
-    setError(null);
-    setConnectionStatus('Testing connection...');
-    
-    try {
-      const healthResult = await argoClient.checkHealth();
-      if (healthResult.isHealthy) {
-        setConnectionStatus('✅ Connection successful!');
-        return healthResult;
-      } else {
-        setConnectionStatus(`❌ Connection failed: ${healthResult.error}`);
-        return healthResult;
-      }
-    } catch (err: any) {
-      setConnectionStatus(`❌ Connection test failed: ${err.message}`);
-      return { isHealthy: false, error: err.message };
-    } finally {
-      setLoading(false);
-    }
-  };
-  
-  // Disconnect function
-  const disconnectStream = () => {
-    setIsConnected(false);
-    setConnectionStatus('Disconnected');
-  };
+  // connection/test UI removed
 
   const listWorkflows = useCallback(async () => {
     setLoading(true);
@@ -160,149 +184,7 @@ const WorkflowManager: React.FC = () => {
     argoClient.setAuthToken(authToken);
   }, [authToken]);
 
-  // Start streaming workflow events when component mounts
-  useEffect(() => {
-    if (!isConnected || !authToken) return;
-    
-    console.log(`Starting to fetch workflow events, namespace: ${namespace}`);
-    argoClient.setAuthToken(authToken);
-    
-    // Display connection status
-    setConnectionStatus('⏳ Connecting to workflow events...');
-    
-    // Add timeout handling
-    const connectionTimeout = setTimeout(() => {
-      console.log('Connection timeout, possible network issues');
-      setConnectionStatus('❌ Connection timeout! Try reconnecting or check network settings.');
-    }, 15000); // 15秒超时
-    
-    // Use the modified streamWorkflowEvents method
-    const eventStream = argoClient.streamWorkflowEvents(
-      namespace,
-      // Message handler function
-      async (event) => {
-        console.log('Received workflow event:', event);
-        // Clear timeout timer after receiving event
-        clearTimeout(connectionTimeout);
-        
-        try {
-          const data = JSON.parse(event.data);
-          console.log('Workflow event parsed successfully:', data);
-          
-          // Update connection status
-          setConnectionStatus('✅ Real-time updates connected, receiving...');
-          
-          // Process workflow update events
-          if (data.result && data.result.object && data.result.object.metadata && data.result.object.status) {
-            const workflow = data.result.object;
-            
-            // Update workflow list
-            setWorkflows(prevWorkflows => {
-              const index = prevWorkflows.findIndex(w => w.metadata.name === workflow.metadata.name);
-              if (index === -1) {
-                return [...prevWorkflows, workflow];
-              } else {
-                const updatedWorkflows = [...prevWorkflows];
-                updatedWorkflows[index] = workflow;
-                return updatedWorkflows;
-              }
-            });
-            
-            // Extract outputs from successful nodes
-            if (workflow.status.nodes) {
-              Object.values(workflow.status.nodes).forEach(async (node: any) => {
-                // Process nodes that have completed successfully and have outputs
-                if (node.phase === 'Succeeded' && node.outputs && node.outputs.parameters) {
-                  node.outputs.parameters.forEach((param: any) => {
-                    if (param.name === 'output-data' && param.value) {
-                      console.log(`Node ${node.name} output: ${param.value}`);
-                      setTaskOutputs(prev => ({
-                        ...prev,
-                        [node.name]: param.value
-                      }));
-                    }
-                  });
-                }
-                
-                // Process failed nodes, display error message
-                if (node.phase === 'Failed' && node.message) {
-                  console.log(`Node ${node.name} failed: ${node.message}`);
-                  setTaskOutputs(prev => ({
-                    ...prev,
-                    [node.name]: `Error: ${node.message}`
-                  }));
-                }
-                
-                // If node is running, display its status
-                if (node.phase === 'Running') {
-                  console.log(`Node ${node.name} is running`);
-                }
-                
-                // If this is a completed container/Pod node (success or failure), get its logs
-                if ((node.type === 'Pod' || node.type === 'Container') && 
-                    (node.phase === 'Succeeded' || node.phase === 'Failed') && 
-                    workflow.metadata.name && node.id) {
-                  try {
-                    console.log(`Getting logs for node ${node.name} (${node.id})`);
-                    const logs = await argoClient.getWorkflowLogs(workflow.metadata.name, node.id, namespace);
-                    console.log(`Logs for ${node.name}:`, logs);
-                    
-                    // Check if logs are empty
-                    if (!logs || logs.trim() === '') {
-                      console.log(`Logs for ${node.name} are empty`);
-                      return; // Skip current callback iteration
-                    }
-                    
-                    // Try to extract useful information from logs
-                    const outputMatch = logs.match(/output-data: (.+)$/m);
-                    if (outputMatch && outputMatch[1] && node.phase === 'Succeeded') {
-                      console.log(`Found output in logs for ${node.name}: ${outputMatch[1]}`);
-                      setTaskOutputs(prev => ({
-                        ...prev,
-                        [node.name]: outputMatch[1].trim()
-                      }));
-                    }
-                  } catch (error: any) {
-                    console.error(`Error getting logs for ${node.name}:`, error);
-                    // More friendly error handling
-                    setTaskOutputs(prev => ({
-                      ...prev,
-                      [node.name]: `Could not get logs: ${error.message || 'Unknown error'}`
-                    }));
-                  }
-                }
-              });
-            }
-          }
-        } catch (error) {
-          console.error('Error processing workflow event:', error);
-          setConnectionStatus('❌ Error processing event, check console');
-        }
-      },
-      // Error handler function
-      (error) => {
-        console.error('Workflow event stream error:', error);
-        // Clear timeout timer
-        clearTimeout(connectionTimeout);
-        
-        if (error.message && error.message.includes('401')) {
-          setConnectionStatus(`❌ Authorization failed (401 Unauthorized)! Please check if your token is correct.`);
-          disconnectStream(); // Disconnect
-        } else {
-          setConnectionStatus(`❌ Connection error! Automatically trying to reconnect...`);
-        }
-      }
-    );
-    
-    // Cleanup function - stop event stream
-    return () => {
-      console.log('Closing workflow event stream');
-      eventStream.stop();
-      setIsConnected(false);
-      // Clear timeout timer
-      clearTimeout(connectionTimeout);
-    };
-  }, [namespace, authToken, isConnected]);
+  // streaming removed
 
   // Refresh workflow and update namespace
   const freshArgoWorkflow = () => {
@@ -328,8 +210,55 @@ const WorkflowManager: React.FC = () => {
       const submittedWorkflow = await argoClient.submitWorkflow(parsedManifest, namespace);
       console.log('Workflow submitted successfully:', submittedWorkflow);
       
-      alert(`Workflow ${submittedWorkflow.metadata.name} submitted successfully!`);
-      listWorkflows(); // Refresh the list
+      const fullName = submittedWorkflow.metadata.name!;
+      alert(`Workflow ${fullName} submitted successfully!`);
+      // Set token and add initial workflow to the list
+      argoClient.setAuthToken(authToken.trim());
+  // Only track the latest submitted workflow
+  setTaskOutputs({});
+  setWorkflows([submittedWorkflow]);
+
+      // Start polling this workflow for updates until it finishes
+      const poller = argoClient.pollWorkflow(
+        fullName,
+        namespace,
+        async (wf) => {
+          // keep only the latest workflow in list
+          setWorkflows([wf]);
+          // update task outputs
+          if (wf.status?.nodes) {
+            const nodes: any[] = Object.values(wf.status.nodes);
+            for (const node of nodes) {
+              if (node.phase === 'Succeeded' && node.outputs?.parameters) {
+                node.outputs.parameters.forEach((param: any) => {
+                  if (param.name === 'output-data' && param.value) {
+                    setTaskOutputs(prev => ({ ...prev, [node.name]: param.value }));
+                  }
+                });
+              }
+              if ((node.type === 'Pod' || node.type === 'Container') &&
+                  (node.phase === 'Succeeded' || node.phase === 'Failed') &&
+                  wf.metadata.name && node.id) {
+                try {
+                  const logs = await argoClient.getWorkflowLogs(wf.metadata.name, node.id, namespace);
+                  if (logs && logs.trim() !== '') {
+                    const outputMatch = logs.match(/output-data: (.+)$/m);
+                    if (outputMatch && outputMatch[1] && node.phase === 'Succeeded') {
+                      setTaskOutputs(prev => ({ ...prev, [node.name]: outputMatch[1].trim() }));
+                    }
+                  }
+                } catch (e) {
+                  // ignore log fetch errors during polling
+                }
+              }
+            }
+          }
+        },
+        (err) => {
+          console.error('Polling error:', err);
+        },
+        2000
+      );
     } catch (err: any) {
       console.error('Submit workflow error:', err);
       if (err instanceof ArgoClientError) {
@@ -503,63 +432,6 @@ const WorkflowManager: React.FC = () => {
         >
           Fresh ArgoWorkflow
         </button>
-        <button 
-          onClick={isConnected ? disconnectStream : async () => {
-            if (authToken) {
-              // Check if token ends with %, which might indicate the token is truncated
-              if (authToken.endsWith('%')) {
-                setError("Your token may be incomplete, ending with % character. Please copy the complete token again.");
-                return;
-              }
-              
-              // Remove possible trailing whitespace
-              const cleanToken = authToken.trim();
-              console.log('Setting auth token:', cleanToken.substring(0, 10) + '...');
-              argoClient.setAuthToken(cleanToken);
-              
-              // Simple test if token is valid
-              try {
-                const result = await testConnection();
-                if (result.isHealthy) {
-                  setIsConnected(true);
-                } else {
-                  setError(`Connection test failed: ${result.error || 'Unknown error'}`);
-                }
-              } catch (error: any) {
-                setError(`Error connecting: ${error.message || 'Unknown error'}`);
-              }
-            } else {
-              setError("Please enter a valid Auth Token first");
-            }
-          }} 
-          disabled={loading || (!authToken && !isConnected)} 
-          style={{ 
-            padding: '10px 15px', 
-            backgroundColor: isConnected ? '#dc3545' : '#28a745', 
-            color: 'white', 
-            border: 'none', 
-            borderRadius: '5px', 
-            cursor: 'pointer'
-          }}
-        >
-          {isConnected ? 'Disconnect' : 'Connection'}
-        </button>
-        {connectionStatus && (
-          <div style={{ marginTop: '10px', padding: '10px', backgroundColor: connectionStatus.includes('✅') ? '#d4edda' : '#f8d7da', border: '1px solid', borderColor: connectionStatus.includes('✅') ? '#c3e6cb' : '#f5c6cb', borderRadius: '5px' }}>
-            {connectionStatus}
-            {connectionStatus.includes('SSL Certificate error') && (
-              <div style={{ marginTop: '10px', fontSize: '14px' }}>
-                <strong>🔧 How to fix SSL Certificate error:</strong>
-                <ol style={{ marginTop: '5px', paddingLeft: '20px' }}>
-                  <li>Click the "Accept Certificate" button above</li>
-                  <li>In the new tab, click "Advanced" on the security warning</li>
-                  <li>Click "Proceed to localhost (unsafe)"</li>
-                  <li>Close that tab and try "Test Connection" again</li>
-                </ol>
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px', borderRadius: '8px' }}>
@@ -618,17 +490,7 @@ const WorkflowManager: React.FC = () => {
           fontSize: '14px',
           marginBottom: '10px'
         }}>
-          <div style={{ display: 'flex', alignItems: 'center' }}>
-            <span style={{ 
-              marginRight: '10px', 
-              fontSize: '16px', 
-              display: 'inline-block',
-              animation: 'pulse 1.5s infinite'
-            }}>🔄</span>
-            <span>
-              <strong>Real-time updates active</strong>: Workflow status and task outputs are automatically updated as tasks complete. No manual refresh needed.
-            </span>
-          </div>
+          <div>Submit a workflow to start live polling and see step results update here in real time.</div>
         </div>
       </div>
       {loading && <p>Loading workflows...</p>}
@@ -656,6 +518,19 @@ const WorkflowManager: React.FC = () => {
                   <ul style={{ marginTop: '5px', paddingLeft: '20px' }}>
                     {Object.values(wf.status.nodes)
                       .filter(node => node.type === 'Pod' || node.type === 'Container')
+                      .sort((a: any, b: any) => {
+                        const dagMap = getDagOrderMap(wf);
+                        const ta = dagMap ? dagMap.get(baseTaskNameFromNode(a)) : undefined;
+                        const tb = dagMap ? dagMap.get(baseTaskNameFromNode(b)) : undefined;
+                        if (ta === undefined && tb === undefined) {
+                          const na = (a.displayName || a.name || '').toString();
+                          const nb = (b.displayName || b.name || '').toString();
+                          return na.localeCompare(nb);
+                        }
+                        if (ta === undefined) return 1;
+                        if (tb === undefined) return -1;
+                        return ta - tb;
+                      })
                       .map((node) => (
                         <li key={node.id} style={{ 
                           marginBottom: '10px', 

@@ -18,52 +18,6 @@ class ArgoApiClient {
     this.authToken = token;
   }
 
-  // Health check method to verify connection to Argo server
-  public async checkHealth(): Promise<{ isHealthy: boolean; error?: string }> {
-    try {
-      const headers: HeadersInit = {};
-      if (this.authToken) {
-        headers['Authorization'] = `Bearer ${this.authToken}`;
-      }
-      
-      const response = await fetch(`${this.baseUrl}/api/v1/info`, {
-        method: 'GET',
-        mode: 'cors',
-        credentials: 'same-origin',
-        headers
-      });
-      
-      if (response.ok) {
-        await response.json();
-        return { isHealthy: true };
-      } else {
-        let errorBody = '';
-        try {
-          errorBody = await response.text();
-        } catch (e) {
-          
-        }
-        
-        return { 
-          isHealthy: false, 
-          error: `Server responded with ${response.status}: ${response.statusText}${errorBody ? '\n' + errorBody : ''}` 
-        };
-      }
-    } catch (error: any) {
-      if (error.message && error.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
-        return { 
-          isHealthy: false, 
-          error: `SSL Certificate error. Please visit ${this.baseUrl} in your browser and accept the certificate, then try again.` 
-        };
-      }
-      
-      return { 
-        isHealthy: false, 
-        error: `Connection failed: ${error.message}` 
-      };
-    }
-  }
-
   private async request<T>(
     method: string,
     path: string,
@@ -172,6 +126,55 @@ class ArgoApiClient {
     return this.request<WorkflowResponse>('GET', path);
   }
 
+  // Poll a single workflow by name and periodically invoke callback with latest data
+  public pollWorkflow(
+    name: string,
+    namespace: string = this.defaultNamespace,
+    onUpdate?: (wf: WorkflowResponse) => void,
+    onError?: (error: any) => void,
+    intervalMs: number = 2000
+  ): { stop: () => void } {
+    let timer: any = null;
+    let stopped = false;
+    let lastResourceVersion: string | undefined;
+
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const wf = await this.getWorkflow(name, namespace);
+        const rv = (wf as any)?.metadata?.resourceVersion;
+        if (!lastResourceVersion || rv !== lastResourceVersion) {
+          lastResourceVersion = rv;
+          onUpdate && onUpdate(wf);
+        }
+        // If finished, we can slow down or stop. Here stop on terminal phase
+        const phase = wf.status?.phase;
+        if (phase === 'Succeeded' || phase === 'Failed' || phase === 'Error') {
+          stopped = true;
+          if (timer) clearTimeout(timer);
+          onUpdate && onUpdate(wf);
+          return;
+        }
+      } catch (err) {
+        onError && onError(err);
+      } finally {
+        if (!stopped) {
+          timer = setTimeout(tick, intervalMs);
+        }
+      }
+    };
+
+    // start
+    timer = setTimeout(tick, 0);
+
+    return {
+      stop: () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+      }
+    };
+  }
+
   public async listWorkflows(
     namespace: string = this.defaultNamespace
   ): Promise<ApiResponse<WorkflowResponse>> {
@@ -231,49 +234,6 @@ class ArgoApiClient {
       const errorMessage = `Failed to list or delete workflows: ${error.message}`;
       result.errors.push(errorMessage);
       return result;
-    }
-  }
-
-  public async testConnection(namespace: string = this.defaultNamespace): Promise<boolean> {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
-      
-      const path = `/api/v1/workflows/${namespace}`;
-      const headers: HeadersInit = {};
-      
-      if (this.authToken) {
-        headers['Authorization'] = `Bearer ${this.authToken}`;
-      }
-      
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        method: 'GET',
-        headers,
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId); 
-      
-      if (!response.ok) {
-        let errorData;
-        try {
-          errorData = await response.json();
-        } catch (e) {
-          errorData = await response.text();
-        }
-        throw new ArgoClientError(
-          `Argo API Error: ${response.statusText}`,
-          response.status,
-          errorData
-        );
-      }
-      
-      return true;
-    } catch (error: any) {
-      if (error.name === 'AbortError') {
-        throw new Error('连接超时，请检查服务器是否可用');
-      }
-      throw error;
     }
   }
 
