@@ -1,0 +1,52 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: dag-pipeline-workflow
+  namespace: argo
+spec:
+  # Use correct account name
+  serviceAccountName: argo-workflow-api-user 
+  entrypoint: dag-pipeline
+  templates:
+    - name: dag-pipeline
+      dag:
+        tasks:
+          - name: task-a
+            template: process-task
+            arguments:
+              parameters:
+                - name: input-data
+                  value: initial-data
+          - name: task-b
+            template: process-task
+            dependencies: [task-a]
+            arguments:
+              parameters:
+                - name: input-data
+                  value: "{{tasks.task-a.outputs.parameters.output-data}}"
+          - name: task-c
+            template: process-task
+            dependencies: [task-b]
+            arguments:
+              parameters:
+                - name: input-data
+                  value: "{{tasks.task-b.outputs.parameters.output-data}}"
+    - name: process-task
+      inputs:
+        parameters:
+          - name: input-data
+      outputs:
+        parameters:
+          - name: output-data
+            valueFrom:
+              path: /tmp/output
+      script:
+        image: python:3.9-alpine
+        command: [python]
+        source: |
+          import sys
+          input_data = "{{inputs.parameters.input-data}}"
+          processed_data = f"{input_data}-processed"
+          print(processed_data)
+          with open('/tmp/output', 'w') as f:
+              f.write(processed_data)
