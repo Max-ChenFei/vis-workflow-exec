@@ -5,59 +5,6 @@ import { WorkflowManifest, WorkflowResponse, ArgoClientError } from '../types/ar
 // Initialize with empty baseUrl to use the proxy in package.json
 const argoClient = new ArgoApiClient();
 
-// Helpers to sort nodes by DAG dependency order
-function getDagOrderMap(wf: WorkflowResponse): Map<string, number> | null {
-  try {
-    const entryName = wf?.spec?.entrypoint;
-    if (!entryName || !wf?.spec?.templates) return null;
-    const tpl = wf.spec.templates.find(t => t.name === entryName);
-    const dagTasks = tpl?.dag?.tasks;
-    if (!dagTasks || dagTasks.length === 0) return null;
-
-    // Build graph from dependencies
-    const names = Array.from(new Set(dagTasks.map(t => t.name)));
-    const indeg: Record<string, number> = {};
-    const adj: Record<string, string[]> = {};
-    names.forEach(n => { indeg[n] = 0; adj[n] = []; });
-    for (const t of dagTasks) {
-      const deps = t.dependencies || [];
-      for (const d of deps) {
-        if (!(d in adj)) { adj[d] = []; if (!(d in indeg)) indeg[d] = 0; }
-        adj[d].push(t.name);
-        indeg[t.name] = (indeg[t.name] ?? 0) + 1;
-      }
-      if (!(t.name in indeg)) indeg[t.name] = indeg[t.name] ?? 0;
-    }
-
-    // Kahn's algorithm for topological order
-    const q: string[] = Object.keys(indeg).filter(k => indeg[k] === 0).sort();
-    const order: string[] = [];
-    while (q.length) {
-      const n = q.shift()!;
-      order.push(n);
-      for (const v of adj[n] || []) {
-        indeg[v] -= 1;
-        if (indeg[v] === 0) q.push(v);
-      }
-      q.sort();
-    }
-
-    // Map task name -> index
-    const map = new Map<string, number>();
-    order.forEach((n, i) => map.set(n, i));
-    return map;
-  } catch {
-    return null;
-  }
-}
-
-function baseTaskNameFromNode(node: any): string {
-  const raw = (node?.displayName || node?.name || '').toString();
-  // strip loop suffix like task-a(0) or task-a (0)
-  const m = raw.match(/^\s*([^\(]+)\s*(?:\(.*\))?\s*$/);
-  return (m && m[1]) ? m[1].trim() : raw;
-}
-
 const sampleWorkflowManifest: WorkflowManifest = {
   apiVersion: 'argoproj.io/v1alpha1',
   kind: 'Workflow',
@@ -145,6 +92,7 @@ const WorkflowManager: React.FC = () => {
   const [namespace, setNamespace] = useState<string>('argo');
   const [workflowToSubmit, setWorkflowToSubmit] = useState<string>(JSON.stringify(sampleWorkflowManifest, null, 2));
   const [taskOutputs, setTaskOutputs] = useState<{ [taskName: string]: string }>({});
+  const [healthStatus, setHealthStatus] = useState<{ isHealthy: boolean; error?: string } | null>(null);
   // connection/test UI removed
 
   const listWorkflows = useCallback(async () => {
@@ -154,20 +102,6 @@ const WorkflowManager: React.FC = () => {
       const response = await argoClient.listWorkflows(namespace);
       const workflowsList = response.items || [];
       setWorkflows(workflowsList);
-      
-      // Fetch task outputs for each workflow that has finished tasks
-      for (const workflow of workflowsList) {
-        if (workflow.status?.nodes && workflow.metadata.name) {
-          // Check if any node has succeeded
-          const hasSucceededNodes = Object.values(workflow.status.nodes).some(
-            node => node.phase === 'Succeeded'
-          );
-          
-          if (hasSucceededNodes) {
-            await fetchWorkflowTaskOutputs(workflow.metadata.name);
-          }
-        }
-      }
     } catch (err: any) {
       if (err instanceof ArgoClientError) {
         setError(`Error listing workflows: ${err.message} (Status: ${err.status})`);
@@ -184,17 +118,21 @@ const WorkflowManager: React.FC = () => {
     argoClient.setAuthToken(authToken);
   }, [authToken]);
 
-  // streaming removed
-
-  // Refresh workflow and update namespace
-  const freshArgoWorkflow = () => {
+  // Handle health check button click
+  const handleHealthCheck = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      const freshManifest = { ...sampleWorkflowManifest };
-      freshManifest.metadata.namespace = namespace;
-      setWorkflowToSubmit(JSON.stringify(freshManifest, null, 2));
+      const result = await argoClient.checkHealth();
+      setHealthStatus(result);
+      if (!result.isHealthy && result.error) {
+        setError(`Health check failed: ${result.error}`);
+      }
     } catch (err: any) {
-      console.error('Error refreshing workflow:', err);
-      setError(`Error refreshing workflow: ${err.message}`);
+      setError(`Health check error: ${err.message}`);
+      setHealthStatus({ isHealthy: false, error: err.message });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -202,63 +140,10 @@ const WorkflowManager: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      console.log('Parsing workflow manifest...');
       const parsedManifest: WorkflowManifest = JSON.parse(workflowToSubmit);
-      console.log('Parsed manifest:', parsedManifest);
-      
-      console.log('Submitting workflow...');
       const submittedWorkflow = await argoClient.submitWorkflow(parsedManifest, namespace);
-      console.log('Workflow submitted successfully:', submittedWorkflow);
-      
       const fullName = submittedWorkflow.metadata.name!;
-      alert(`Workflow ${fullName} submitted successfully!`);
-      // Set token and add initial workflow to the list
-      argoClient.setAuthToken(authToken.trim());
-  // Only track the latest submitted workflow
-  setTaskOutputs({});
-  setWorkflows([submittedWorkflow]);
-
-      // Start polling this workflow for updates until it finishes
-      const poller = argoClient.pollWorkflow(
-        fullName,
-        namespace,
-        async (wf) => {
-          // keep only the latest workflow in list
-          setWorkflows([wf]);
-          // update task outputs
-          if (wf.status?.nodes) {
-            const nodes: any[] = Object.values(wf.status.nodes);
-            for (const node of nodes) {
-              if (node.phase === 'Succeeded' && node.outputs?.parameters) {
-                node.outputs.parameters.forEach((param: any) => {
-                  if (param.name === 'output-data' && param.value) {
-                    setTaskOutputs(prev => ({ ...prev, [node.name]: param.value }));
-                  }
-                });
-              }
-              if ((node.type === 'Pod' || node.type === 'Container') &&
-                  (node.phase === 'Succeeded' || node.phase === 'Failed') &&
-                  wf.metadata.name && node.id) {
-                try {
-                  const logs = await argoClient.getWorkflowLogs(wf.metadata.name, node.id, namespace);
-                  if (logs && logs.trim() !== '') {
-                    const outputMatch = logs.match(/output-data: (.+)$/m);
-                    if (outputMatch && outputMatch[1] && node.phase === 'Succeeded') {
-                      setTaskOutputs(prev => ({ ...prev, [node.name]: outputMatch[1].trim() }));
-                    }
-                  }
-                } catch (e) {
-                  // ignore log fetch errors during polling
-                }
-              }
-            }
-          }
-        },
-        (err) => {
-          console.error('Polling error:', err);
-        },
-        2000
-      );
+      console.log(`Workflow ${fullName} submitted successfully!`);         
     } catch (err: any) {
       console.error('Submit workflow error:', err);
       if (err instanceof ArgoClientError) {
@@ -280,27 +165,6 @@ const WorkflowManager: React.FC = () => {
     }
   };
 
-  const handleDeleteWorkflow = async (name: string) => {
-    if (!window.confirm(`Are you sure you want to delete workflow "${name}"?`)) {
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      await argoClient.deleteWorkflow(name, namespace);
-      alert(`Workflow "${name}" deleted successfully!`);
-      listWorkflows(); // Refresh the list
-    } catch (err: any) {
-      if (err instanceof ArgoClientError) {
-        setError(`Error deleting workflow: ${err.message} (Status: ${err.status})`);
-      } else {
-        setError(`An unexpected error occurred: ${err.message}`);
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleDeleteAllWorkflows = async () => {
     if (!window.confirm(`Are you sure you want to delete ALL workflows in namespace "${namespace}"?`)) {
       return;
@@ -311,8 +175,6 @@ const WorkflowManager: React.FC = () => {
       const result = await argoClient.deleteAllWorkflows(namespace);
       if (result.errors.length > 0) {
         setError(`Deleted ${result.deleted} workflows, but encountered ${result.errors.length} errors:\n${result.errors.join('\n')}`);
-      } else {
-        alert(`Successfully deleted ${result.deleted} workflows!`);
       }
       listWorkflows(); // Refresh the list
     } catch (err: any) {
@@ -326,64 +188,7 @@ const WorkflowManager: React.FC = () => {
     }
   };
 
-  // Function to fetch task outputs for a workflow
-  const fetchWorkflowTaskOutputs = async (workflowName: string) => {
-    try {
-      const workflow = await argoClient.getWorkflow(workflowName, namespace);
-      
-      if (workflow.status?.nodes) {
-        const newOutputs: { [key: string]: string } = {};
-        const fetchPromises: Promise<void>[] = [];
-        
-        // For each completed node, try to get its outputs
-        Object.values(workflow.status.nodes).forEach(node => {
-          if (node.phase === 'Succeeded') {
-            // First check if the node has output parameters directly in the status
-            if (node.outputs?.parameters) {
-              node.outputs.parameters.forEach((param: any) => {
-                if (param.name === 'output-data' && param.value) {
-                  newOutputs[node.name] = param.value;
-                }
-              });
-            }
-            
-            // If there's a pod name, we can try to get logs which might contain the output
-            if (node.type === 'Pod' && workflow.metadata.name && node.id) {
-              const fetchPromise = argoClient.getWorkflowLogs(workflow.metadata.name, node.id, namespace)
-                .then(logs => {
-                  console.log(`Logs for ${node.name}:`, logs);
-                  // Simple extraction of output from logs - might need to be adjusted based on actual log format
-                  const outputMatch = logs.match(/output-data: (.+)$/m);
-                  if (outputMatch && outputMatch[1]) {
-                    newOutputs[node.name] = outputMatch[1].trim();
-                  }
-                })
-                .catch(error => {
-                  console.error(`Error fetching logs for ${node.name}:`, error);
-                });
-              
-              fetchPromises.push(fetchPromise);
-            }
-          }
-        });
-        
-        // Wait for all log fetching to complete
-        await Promise.all(fetchPromises);
-        
-        console.log("newOutput:", newOutputs);
-        // Update task outputs state with new outputs
-        if (Object.keys(newOutputs).length > 0) {
-          setTaskOutputs(prev => ({
-            ...prev,
-            ...newOutputs
-          }));
-          console.log('Updated task outputs:', newOutputs);
-        }
-      }
-    } catch (error) {
-      console.error('Error fetching workflow task outputs:', error);
-    }
-  };
+
 
   return (
     <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
@@ -396,11 +201,7 @@ const WorkflowManager: React.FC = () => {
           <input
             type="text"
             value={authToken}
-            onChange={(e) => {
-              // Clean token, remove trailing % and any whitespace
-              const cleanToken = e.target.value.replace(/%+$/, '').trim();
-              setAuthToken(cleanToken);
-            }}
+            onChange={(e) => setAuthToken(e.target.value)}
             placeholder="Enter Argo API Token"
             style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
           />
@@ -415,23 +216,34 @@ const WorkflowManager: React.FC = () => {
             style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
           />
         </div>
-        <button onClick={listWorkflows} disabled={loading} style={{ padding: '10px 15px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', marginRight: '10px' }}>
-          {loading ? 'Loading...' : 'List Workflows'}
-        </button>
         <button 
-          onClick={freshArgoWorkflow} 
+          onClick={handleHealthCheck} 
           style={{ 
             padding: '10px 15px', 
-            backgroundColor: '#6c757d', 
+            backgroundColor: '#17a2b8', 
             color: 'white', 
             border: 'none', 
             borderRadius: '5px', 
-            cursor: 'pointer',
-            marginRight: '10px'
+            cursor: 'pointer'
           }}
         >
-          Fresh ArgoWorkflow
+          Check Connection
         </button>
+        {healthStatus !== null && (
+          <div style={{
+            marginTop: '10px',
+            padding: '8px',
+            borderRadius: '4px',
+            backgroundColor: healthStatus.isHealthy ? '#d4edda' : '#f8d7da',
+            color: healthStatus.isHealthy ? '#155724' : '#721c24',
+            border: healthStatus.isHealthy ? '1px solid #c3e6cb' : '1px solid #f5c6cb'
+          }}>
+            {healthStatus.isHealthy ? 
+              '✅ Connection successful!' : 
+              `❌ Connection failed: ${healthStatus.error || 'Unknown error'}`
+            }
+          </div>
+        )}
       </div>
 
       <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px', borderRadius: '8px' }}>
@@ -467,6 +279,20 @@ const WorkflowManager: React.FC = () => {
       <div style={{ marginBottom: '15px' }}>
         <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
           <button 
+            onClick={listWorkflows} 
+            disabled={loading} 
+            style={{ 
+              padding: '10px 15px', 
+              backgroundColor: '#007bff', 
+              color: 'white', 
+              border: 'none', 
+              borderRadius: '5px', 
+              cursor: 'pointer'
+            }}
+          >
+            {loading ? 'Loading...' : 'List Workflows'}
+          </button>
+          <button 
             onClick={handleDeleteAllWorkflows} 
             disabled={loading || workflows.length === 0} 
             style={{ 
@@ -490,7 +316,7 @@ const WorkflowManager: React.FC = () => {
           fontSize: '14px',
           marginBottom: '10px'
         }}>
-          <div>Submit a workflow to start live polling and see step results update here in real time.</div>
+          <div>Click "List Workflows" to see existing workflows in the namespace.</div>
         </div>
       </div>
       {loading && <p>Loading workflows...</p>}
@@ -498,7 +324,7 @@ const WorkflowManager: React.FC = () => {
       {!loading && workflows.length > 0 && (
         <ul style={{ listStyleType: 'none', padding: 0 }}>
           {workflows.map((wf) => (
-            <li key={wf.metadata.name} style={{ border: '1px solid #eee', padding: '10px', marginBottom: '10px', borderRadius: '5px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <li key={wf.metadata.name} style={{ border: '1px solid #eee', padding: '10px', marginBottom: '10px', borderRadius: '5px' }}>
               <div>
                 <strong>Name:</strong> {wf.metadata.name} <br />
                 <strong>Phase:</strong> <span style={{ 
@@ -518,19 +344,6 @@ const WorkflowManager: React.FC = () => {
                   <ul style={{ marginTop: '5px', paddingLeft: '20px' }}>
                     {Object.values(wf.status.nodes)
                       .filter(node => node.type === 'Pod' || node.type === 'Container')
-                      .sort((a: any, b: any) => {
-                        const dagMap = getDagOrderMap(wf);
-                        const ta = dagMap ? dagMap.get(baseTaskNameFromNode(a)) : undefined;
-                        const tb = dagMap ? dagMap.get(baseTaskNameFromNode(b)) : undefined;
-                        if (ta === undefined && tb === undefined) {
-                          const na = (a.displayName || a.name || '').toString();
-                          const nb = (b.displayName || b.name || '').toString();
-                          return na.localeCompare(nb);
-                        }
-                        if (ta === undefined) return 1;
-                        if (tb === undefined) return -1;
-                        return ta - tb;
-                      })
                       .map((node) => (
                         <li key={node.id} style={{ 
                           marginBottom: '10px', 
@@ -615,9 +428,6 @@ const WorkflowManager: React.FC = () => {
                 </div>
                 )}
               </div>
-              <button onClick={() => handleDeleteWorkflow(wf.metadata.name!)} disabled={loading} style={{ padding: '8px 12px', backgroundColor: '#dc3545', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>
-                Delete
-              </button>
             </li>
           ))}
         </ul>
