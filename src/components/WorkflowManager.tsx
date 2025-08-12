@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import ArgoApiClient from '../api/ArgoApiClient';
 import { WorkflowManifest, WorkflowResponse, ArgoClientError } from '../types/argo';
 
-// Initialize with empty baseUrl to use the proxy in package.json
 const argoClient = new ArgoApiClient();
 
 const sampleWorkflowManifest: WorkflowManifest = {
@@ -93,7 +92,7 @@ const WorkflowManager: React.FC = () => {
   const [workflowToSubmit, setWorkflowToSubmit] = useState<string>(JSON.stringify(sampleWorkflowManifest, null, 2));
   const [taskOutputs, setTaskOutputs] = useState<{ [taskName: string]: string }>({});
   const [healthStatus, setHealthStatus] = useState<{ isHealthy: boolean; error?: string } | null>(null);
-  // connection/test UI removed
+  
 
   const listWorkflows = useCallback(async () => {
     setLoading(true);
@@ -119,11 +118,11 @@ const WorkflowManager: React.FC = () => {
   }, [authToken]);
 
   // Handle health check button click
-  const handleHealthCheck = async () => {
+  const handleHealthCheck = async (namespace: string) => {
     setLoading(true);
     setError(null);
     try {
-      const result = await argoClient.checkHealth();
+      const result = await argoClient.checkHealth(namespace);
       setHealthStatus(result);
       if (!result.isHealthy && result.error) {
         setError(`Health check failed: ${result.error}`);
@@ -217,7 +216,7 @@ const WorkflowManager: React.FC = () => {
           />
         </div>
         <button 
-          onClick={handleHealthCheck} 
+          onClick={() => handleHealthCheck(namespace)} 
           style={{ 
             padding: '10px 15px', 
             backgroundColor: '#17a2b8', 
@@ -238,9 +237,9 @@ const WorkflowManager: React.FC = () => {
             color: healthStatus.isHealthy ? '#155724' : '#721c24',
             border: healthStatus.isHealthy ? '1px solid #c3e6cb' : '1px solid #f5c6cb'
           }}>
-            {healthStatus.isHealthy ? 
+            {healthStatus.isHealthy ?
               '✅ Connection successful!' : 
-              `❌ Connection failed: ${healthStatus.error || 'Unknown error'}`
+              `${healthStatus.error || 'Unknown error'}`
             }
           </div>
         )}

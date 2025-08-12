@@ -1,20 +1,16 @@
 import { WorkflowManifest, WorkflowResponse, ApiResponse, ArgoClientError } from '../types/argo';
 
 class ArgoApiClient {
-  private baseUrl: string;
   private authToken: string | null;
   private namespace: string;
 
-  constructor(baseUrl: string = '', authToken: string | null = null, defaultNamespace: string = 'default') {
-    this.baseUrl = baseUrl;
+  constructor( authToken: string | null = null, defaultNamespace: string = 'default') {
     this.authToken = authToken;
     this.namespace = defaultNamespace;
   }
 
-  public setAuthToken(token: string | null): void {
-    if (token) {
-      token = token.replace(/%+$/, '').trim();
-    }
+  public setAuthToken(token: string): void {
+    token = token.trim();
     this.authToken = token;
   }
 
@@ -31,6 +27,7 @@ class ArgoApiClient {
     if (this.authToken) {
       headers['Authorization'] = `Bearer ${this.authToken}`;
     }
+  headers['Accept'] = 'application/json';
     const config: RequestInit = {
       method: method,
       headers: headers,
@@ -41,22 +38,25 @@ class ArgoApiClient {
     if (data) {
       config.body = JSON.stringify(data);
     }
-
-    const fullUrl = `${this.baseUrl}${path}`;
     
     try {
-      const response = await fetch(fullUrl, config);
+      const response = await fetch(path, config);
       if (!response.ok) {
-        let errorData;
+        let errorData: any = null;
         try {
           errorData = await response.json();
-        } catch (e) {
-          errorData = await response.text();
+        } catch {
+          try {
+            errorData = await response.text();
+          } catch {
+         
+          }
         }
+        console.log("error:", errorData);
+
         throw new ArgoClientError(
-          `Argo API Error: ${response.statusText}`,
-          response.status,
-          errorData
+            errorData?.message || errorData,
+            response.status,
         );
       }
 
@@ -64,35 +64,39 @@ class ArgoApiClient {
         try {
           const result = await response.json();
           return result;
-        } catch (error) {
+        } catch {
           const textResult = await response.text();
-          return textResult as unknown as T;
+          try {
+            return JSON.parse(textResult) as T; 
+          } catch {
+            return textResult as unknown as T;
+          }
         }
       } else {
         const textResult = await response.text();
         return textResult as unknown as T;
       }
-    } catch (error: any) {
-      // Handle SSL certificate errors specifically
-      if (error.message && error.message.includes('ERR_CERT_AUTHORITY_INVALID')) {
+    } catch (err: any) {
+      if (err?.message?.includes('ERR_CERT_AUTHORITY_INVALID')) {
         throw new ArgoClientError(
           'SSL Certificate Error: Please accept the self-signed certificate by visiting https://localhost:2747 in your browser and accepting the security warning, then try again.',
           0,
-          { originalError: error.message }
+          { originalError: err.message }
         );
       }
-      
-      if (error instanceof ArgoClientError) {
-        throw error;
-      }
-      throw new ArgoClientError(`Network or unexpected error: ${error.message}`);
+     
+      throw err;
     }
   }
 
-  public async checkHealth(): Promise<{ isHealthy: boolean; error?: string }> {
-    const path = `/api/v1/info`;     
-    const response = await this.request<WorkflowResponse>('GET', path, undefined, false);
-    return { isHealthy: !!response };
+  public async checkHealth(namespace: string): Promise<{ isHealthy: boolean; error?: string }> {
+    const path = `/api/v1/workflows/${namespace}?limit=1`;     
+    try {
+      const response = await this.request<WorkflowResponse>('GET', path, undefined, true);
+      return { isHealthy: !!response };
+    } catch (e: any) {
+      return { isHealthy: false, error: e?.message || 'Unknown error' };
+    }
   }
   
 
