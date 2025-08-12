@@ -1,4 +1,4 @@
-import { WorkflowManifest, WorkflowResponse, ApiResponse, ArgoClientError } from '../types/argo';
+import { WorkflowResponse, ApiResponse } from '../types/argo';
 
 class ArgoApiClient {
   private authToken: string | null;
@@ -21,13 +21,10 @@ class ArgoApiClient {
     expectJson: boolean = true
   ): Promise<T> {
     const headers: HeadersInit = {};
-    if (data) {
-      headers['Content-Type'] = 'application/json';
-    }
     if (this.authToken) {
       headers['Authorization'] = `Bearer ${this.authToken}`;
     }
-  headers['Accept'] = 'application/json';
+    headers['Accept'] = 'application/json';
     const config: RequestInit = {
       method: method,
       headers: headers,
@@ -35,105 +32,61 @@ class ArgoApiClient {
       credentials: 'same-origin',
     };
 
-    if (data) {
+     if (data) {
+      headers['Content-Type'] = 'application/json';
       config.body = JSON.stringify(data);
     }
     
-    try {
-      const response = await fetch(path, config);
-      if (!response.ok) {
-        let errorData: any = null;
-        try {
-          errorData = await response.json();
-        } catch {
-          try {
-            errorData = await response.text();
-          } catch {
-         
-          }
-        }
-        console.log("error:", errorData);
+    const response = await fetch(path, config);
 
-        throw new ArgoClientError(
-            errorData?.message || errorData,
-            response.status,
-        );
-      }
+    if (!response.ok) {
+      const err: any = new Error('');
 
-      if (expectJson) {
-        try {
-          const result = await response.json();
-          return result;
-        } catch {
-          const textResult = await response.text();
-          try {
-            return JSON.parse(textResult) as T; 
-          } catch {
-            return textResult as unknown as T;
-          }
-        }
-      } else {
-        const textResult = await response.text();
-        return textResult as unknown as T;
-      }
-    } catch (err: any) {
-      if (err?.message?.includes('ERR_CERT_AUTHORITY_INVALID')) {
-        throw new ArgoClientError(
-          'SSL Certificate Error: Please accept the self-signed certificate by visiting https://localhost:2747 in your browser and accepting the security warning, then try again.',
-          0,
-          { originalError: err.message }
-        );
-      }
-     
+      err.status = response.status;
+      err.msg = response.statusText; 
       throw err;
     }
+
+    
+    if (expectJson) {
+        const result = await response.json();
+        return result as T;
+    } else {
+      const result = await response.text();
+      return result as T;
+    }
+  
   }
 
-  public async checkHealth(namespace: string): Promise<{ isHealthy: boolean; error?: string }> {
-    const path = `/api/v1/workflows/${namespace}?limit=1`;     
+  public async checkHealth(namespace: string): Promise<{ isHealthy: boolean; error?: string, status?: number }> {
+    const path = `/api/v1/workflows/${namespace}?limit=1`;
     try {
       const response = await this.request<WorkflowResponse>('GET', path, undefined, true);
       return { isHealthy: !!response };
     } catch (e: any) {
-      return { isHealthy: false, error: e?.message || 'Unknown error' };
+      return { isHealthy: false, error: e?.msg || 'Unknown error', status: e?.status};
     }
   }
   
-
   public async submitWorkflow(
-    workflowManifest: WorkflowManifest,
+    workflowManifest:any,
     namespace: string = this.namespace
   ): Promise<WorkflowResponse> {
-    const path = `/api/v1/workflows/${namespace}`;     
+    const path = `/api/v1/workflows/${namespace}`;    
+
     const requestBody = {
-      workflow: workflowManifest,
-      namespace: namespace
+      workflow: workflowManifest
     };
     
     return this.request<WorkflowResponse>('POST', path, requestBody);
   }
 
-  public async getWorkflow(
-    name: string,
-    namespace: string = this.namespace
-  ): Promise<WorkflowResponse> {
-    const path = `/api/v1/workflows/${namespace}/${name}`;
-    return this.request<WorkflowResponse>('GET', path);
-  }
 
   public async listWorkflows(
     namespace: string = this.namespace
   ): Promise<ApiResponse<WorkflowResponse>> {
     const path = `/api/v1/workflows/${namespace}`;
     return this.request<ApiResponse<WorkflowResponse>>('GET', path);
-  }
-
-   public async deleteWorkflow(
-    name: string,
-    namespace: string = this.namespace
-  ): Promise<void> {
-    const path = `/api/v1/workflows/${namespace}/${name}`;
-    await this.request<void>('DELETE', path);
   }
 
   public async deleteAllWorkflows(
@@ -158,7 +111,8 @@ class ArgoApiClient {
         
         try {
           const name = workflow.metadata.name;
-          await this.deleteWorkflow(name, namespace);
+          const path = `/api/v1/workflows/${namespace}/${name}`;
+          await this.request<void>('DELETE', path);
           result.deleted++;
         } catch (error: any) {
           const errorMessage = `Failed to delete workflow ${workflow.metadata?.name}: ${error.message}`;

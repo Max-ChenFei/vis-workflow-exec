@@ -201,9 +201,4 @@ export interface TaskOutput {
   finishedAt?: string;
 }
 
-export class ArgoClientError extends Error {
-  constructor(message: string, public status?: number, public response?: any) {
-    super(message);
-    this.name = 'ArgoClientError';
-  }
-}
+
