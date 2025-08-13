@@ -9,6 +9,8 @@ export interface WorkflowMetadata {
   name?: string;
   generateName?: string;
   namespace?: string;
+  uid?: string;
+  resourceVersion?: string;
   labels?: { [key: string]: string };
   annotations?: { [key: string]: string };
 }

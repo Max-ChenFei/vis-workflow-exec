@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import ArgoApiClient from '../api/ArgoApiClient';
+import { WorkflowEventStream, WorkflowEvent } from '../api/WorkflowEventStream';
 import { WorkflowManifest, WorkflowResponse } from '../types/argo';
 
 const argoClient = new ArgoApiClient();
@@ -67,6 +68,19 @@ with open('/tmp/output', 'w') as f:
     ]
   }
 });
+
+// Helper function to get color for workflow phase
+const getPhaseColor = (phase: string): string => {
+  switch (phase.toLowerCase()) {
+    case 'pending': return '#6c757d';
+    case 'running': return '#007bff';
+    case 'succeeded': return '#28a745';
+    case 'failed': return '#dc3545';
+    case 'error': return '#dc3545';
+    default: return '#6c757d';
+  }
+};
+
 const WorkflowManager: React.FC = () => {
   const [workflows, setWorkflows] = useState<WorkflowResponse[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
@@ -79,6 +93,9 @@ const WorkflowManager: React.FC = () => {
   );
   const [taskOutputs, setTaskOutputs] = useState<{ [taskName: string]: string }>({});
   const [healthStatus, setHealthStatus] = useState<{ isHealthy: boolean; error?: string, status?: number } | null>(null);
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const [workflowEvents, setWorkflowEvents] = useState<WorkflowEvent[]>([]);
+  const [eventStream, setEventStream] = useState<WorkflowEventStream | null>(null);
 
 
   const listWorkflows = useCallback(async () => {
@@ -100,6 +117,29 @@ const WorkflowManager: React.FC = () => {
     argoClient.setAuthToken(authToken);
   }, [authToken]);
 
+//   useEffect(() => {
+//   fetch('/api/v1/workflows/argo', {
+//   method: 'GET',
+//   headers: {
+//     'Authorization': 'Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6ImsyYUMyeXMybGdoeENWUDBxWjNHZGNvUUg5ZjBoM2RKYmJSTWZua3d3MkUifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJhcmdvIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6ImFyZ28td29ya2Zsb3ctYXBpLXVzZXItdG9rZW4iLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoiYXJnby13b3JrZmxvdy1hcGktdXNlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6IjAwNjdlNDA0LTU3NjgtNDk1Ny04ODhjLTAxMTVmMWUzMjhlMyIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDphcmdvOmFyZ28td29ya2Zsb3ctYXBpLXVzZXIifQ.VDuW2Enn5kaAQ0S2QcQ3Z2_LCxQQvqisiIyM_snlGKstc4BhAg78nasxteugPFZdyt9pq6ghSCnm512M8FBGusFCYzQAeQqq-ZEfN0yDxfasyDrk3s7jmwBrAAmDAEVp2vh2xoHuBHgo67yQG617Y3RUqdnAMgiEYLl4wwd4lYOHQfYGhy7v3eB5Cdwva7KEOW4G_3bW5RJ7z1iz3o-of_3aDOp06JBSdlYN1sNT4Dqm4AV5ocBvhnIwlKZFsU44dcIUoCuv7VmcON55ZM3D_9pLtanNEUMFjhiAirjkRHKJKaYUINER-aFN-FurfDJBrJ4WBgEC0N-iEkVXiSf6MQ',
+//     'Content-Type': 'application/json'
+//   }
+// })
+// .then(response => {
+//   if (!response.ok) {
+//     throw new Error('Network response was not ok: ' + response.statusText);
+//   }
+//   return response.json(); // Parse the response as JSON
+// })
+// .then(data => {
+//   console.log('Response data:', data); // Log the data to the console
+// })
+// .catch(error => {
+//   console.error('There was a problem with the fetch operation:', error); // Handle errors here
+// });
+
+//   }, []);
+
   // Handle health check button click
   const handleHealthCheck = async (namespace: string) => {
     setLoading(true);
@@ -112,6 +152,9 @@ const WorkflowManager: React.FC = () => {
       setLoading(false);
     }
   };
+
+
+  
 
   const handleSubmitWorkflow = async () => {
     setLoading(true);
@@ -156,6 +199,87 @@ const WorkflowManager: React.FC = () => {
       setLoading(false);
     }
   };
+
+  // Streaming functions
+  const startWorkflowEventStream = useCallback(() => {
+    if (eventStream) {
+      eventStream.close();
+    }
+
+    const newEventStream = new WorkflowEventStream(authToken);
+    setEventStream(newEventStream);
+    setIsStreaming(true);
+    setWorkflowEvents([]); // Clear previous events
+
+    const cleanup = newEventStream.streamWorkflowEvents(
+      namespace,
+      (event: WorkflowEvent) => {
+        console.log('Received workflow event:', event);
+        
+        // Validate event before processing
+        if (!event || !event.object || !event.object.metadata) {
+          console.warn('Skipping invalid event:', event);
+          return;
+        }
+
+        setWorkflowEvents(prev => [...prev, event]);
+        
+        // Update workflows list with the latest event
+        if (event.type === 'ADDED' || event.type === 'MODIFIED') {
+          setWorkflows(prev => {
+            const existingIndex = prev.findIndex(w => w.metadata.uid === event.object.metadata.uid);
+            if (existingIndex >= 0) {
+              // Update existing workflow
+              const updated = [...prev];
+              updated[existingIndex] = event.object;
+              return updated;
+            } else {
+              // Add new workflow
+              return [...prev, event.object];
+            }
+          });
+        } else if (event.type === 'DELETED') {
+          setWorkflows(prev => prev.filter(w => w.metadata.uid !== event.object.metadata.uid));
+        }
+      },
+      (error: Event) => {
+        console.error('Workflow event stream error:', error);
+        setError('Streaming connection error');
+        setIsStreaming(false);
+      },
+      () => {
+        console.log('Workflow event stream connected');
+        setError(null);
+      }
+    );
+
+    // Return cleanup function directly since streamWorkflowEvents returns it synchronously
+    return cleanup;
+  }, [authToken, namespace, eventStream]);
+
+  const stopWorkflowEventStream = useCallback(() => {
+    if (eventStream) {
+      eventStream.close();
+      setEventStream(null);
+    }
+    setIsStreaming(false);
+  }, [eventStream]);
+
+  // Initialize event stream when component mounts
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    
+    if (authToken && namespace) {
+      cleanup = startWorkflowEventStream();
+    }
+
+    return () => {
+      if (cleanup) {
+        cleanup();
+      }
+      stopWorkflowEventStream();
+    };
+  }, [authToken, namespace]); // Remove startWorkflowEventStream and stopWorkflowEventStream from dependencies to avoid infinite loop
 
 
 
@@ -223,6 +347,90 @@ const WorkflowManager: React.FC = () => {
             }
           </div>
         )}
+      </div>
+
+      {/* Streaming Controls */}
+      <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px', borderRadius: '8px' }}>
+        <h2>Real-time Workflow Events</h2>
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '10px' }}>
+          <button
+            onClick={startWorkflowEventStream}
+            disabled={isStreaming}
+            style={{
+              padding: '10px 15px',
+              backgroundColor: isStreaming ? '#6c757d' : '#28a745',
+              color: 'white',
+              border: 'none',
+              borderRadius: '5px',
+              cursor: isStreaming ? 'not-allowed' : 'pointer'
+            }}
+          >
+            {isStreaming ? 'Streaming Active' : 'Start Streaming'}
+          </button>
+          <button
+            onClick={stopWorkflowEventStream}
+            disabled={!isStreaming}
+            style={{
+              padding: '10px 15px',
+              backgroundColor: !isStreaming ? '#6c757d' : '#dc3545',
+              color: 'white',
+              border: 'none',
+              borderRadius: '5px',
+              cursor: !isStreaming ? 'not-allowed' : 'pointer'
+            }}
+          >
+            Stop Streaming
+          </button>
+          <span style={{ 
+            padding: '8px 12px', 
+            borderRadius: '4px',
+            backgroundColor: isStreaming ? '#d4edda' : '#f8d7da',
+            color: isStreaming ? '#155724' : '#721c24',
+            border: isStreaming ? '1px solid #c3e6cb' : '1px solid #f5c6cb'
+          }}>
+            {isStreaming ? '🟢 Streaming' : '🔴 Not streaming'}
+          </span>
+        </div>
+        
+        {/* Event Log */}
+        <div style={{ marginTop: '15px' }}>
+          <h3>Recent Events ({workflowEvents.length})</h3>
+          <div style={{ 
+            maxHeight: '200px', 
+            overflowY: 'auto', 
+            border: '1px solid #ddd', 
+            padding: '10px',
+            backgroundColor: '#f8f9fa',
+            fontFamily: 'monospace',
+            fontSize: '12px'
+          }}>
+            {workflowEvents
+              .filter(event => event && event.object && event.object.metadata) // Filter out invalid events
+              .slice(-20)
+              .map((event, index) => (
+              <div key={index} style={{ marginBottom: '5px', padding: '5px', borderBottom: '1px solid #eee' }}>
+                <strong>[{event.type}]</strong> {event.object.metadata.name || 'Unknown'} 
+                {event.object.status?.phase && (
+                  <span style={{ 
+                    marginLeft: '10px', 
+                    padding: '2px 6px', 
+                    borderRadius: '3px',
+                    backgroundColor: getPhaseColor(event.object.status.phase),
+                    color: 'white',
+                    fontSize: '10px'
+                  }}>
+                    {event.object.status.phase}
+                  </span>
+                )}
+              </div>
+            ))}
+            {workflowEvents.filter(event => event && event.object && event.object.metadata).length === 0 && (
+              <div style={{ color: '#6c757d', textAlign: 'center', padding: '20px' }}>
+                No events yet. Start streaming to see workflow events in real-time.
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px', borderRadius: '8px' }}>
