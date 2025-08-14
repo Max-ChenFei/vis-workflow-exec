@@ -1,7 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import ArgoApiClient from '../api/ArgoApiClient';
-import { WorkflowEventStream, WorkflowEvent } from '../api/WorkflowEventStream';
-import { WorkflowManifest, WorkflowResponse } from '../types/argo';
+import { ArgoApiClient, WorkflowStatus, WorkflowManifest, ArgoRestApiResponse } from '../api';
 
 const argoClient = new ArgoApiClient();
 
@@ -10,7 +8,7 @@ const buildSampleWorkflow = (): WorkflowManifest => ({
   kind: 'Workflow',
   metadata: {
     generateName: 'dag-pipeline-',
-    namespace: 'argo', // not changed
+    namespace: 'argo',
   },
   spec: {
     entrypoint: 'dag-pipeline',
@@ -68,7 +66,6 @@ with open('/tmp/output', 'w') as f:
   }
 });
 
-// Helper function to get color for workflow phase
 const getPhaseColor = (phase: string): string => {
   switch (phase.toLowerCase()) {
     case 'pending': return '#6c757d';
@@ -81,34 +78,18 @@ const getPhaseColor = (phase: string): string => {
 };
 
 const WorkflowManager: React.FC = () => {
-  const [workflows, setWorkflows] = useState<WorkflowResponse[]>([]);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
+  const [argoResponse, setArgoResponses] = useState<ArgoRestApiResponse[]>([]);
+  const [currentWorkflowStatus, setCurrentWorkflowStatus] = useState<WorkflowStatus | null>(null);
+
   const [workflowToSubmit, setWorkflowToSubmit] = useState<string>(
     JSON.stringify(buildSampleWorkflow(), null, 2)
   );
+  
+
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
   const [healthStatus, setHealthStatus] = useState<{ isHealthy: boolean; error?: string, status?: number } | null>(null);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
-  const [eventStream, setEventStream] = useState<WorkflowEventStream | null>(null);
-  // received workflow events after streaming starts
-  const [workflowEvents, setWorkflowEvents] = useState<WorkflowEvent[]>([]);
-  const [currentWorkflowOutputs, setCurrentWorkflowOutputs] = useState<Array<{taskName: string, outputs: string[]}>>([]);
-
-
-  const listWorkflows = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await argoClient.listWorkflows();
-      const workflowsList = response.items || [];
-      setWorkflows(workflowsList);
-    } catch (err: any) {
-      setError(`Error listing workflows: ${err?.message || 'Unknown error'}`);
-      setWorkflows([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
 
   const handleHealthCheck = async () => {
     setLoading(true);
@@ -122,6 +103,20 @@ const WorkflowManager: React.FC = () => {
     }
   };
 
+  const listWorkflows = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await argoClient.listWorkflows();
+      const workflowsList = response.items || [];
+      setArgoResponses(workflowsList);
+    } catch (err: any) {
+      setError(`Error listing workflows: ${err?.message || 'Unknown error'}`);
+      setArgoResponses([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   const handleSubmitWorkflow = async () => {
     setLoading(true);
@@ -130,7 +125,7 @@ const WorkflowManager: React.FC = () => {
       const parsedManifest: WorkflowManifest = JSON.parse(workflowToSubmit);
       const submittedWorkflow = await argoClient.submitWorkflow(parsedManifest);
       const fullName = submittedWorkflow.metadata.name!;
-      startWorkflowEventStream(fullName);
+      startWatchingWorkflow(fullName);
       console.log(`Workflow ${fullName} submitted successfully!`);         
     } catch (err: any) {
       console.error('Submit workflow error:', err);
@@ -155,7 +150,7 @@ const WorkflowManager: React.FC = () => {
       if (result.errors.length > 0) {
         setError(`Deleted ${result.deleted} workflows, but encountered ${result.errors.length} errors:\n${result.errors.join('\n')}`);
       }
-      listWorkflows(); // Refresh the list
+      listWorkflows();
     } catch (err: any) {
       setError(`Error deleting workflows: ${err?.message || 'Unknown error'}`);
     } finally {
@@ -163,42 +158,15 @@ const WorkflowManager: React.FC = () => {
     }
   };
 
-  const getWorkflowOutputs = (workflow: WorkflowResponse) => {
-  if (!workflow.status?.nodes) return [];
-
-  return Object.values(workflow.status.nodes)
-    .filter((node: any) => node.outputs?.parameters && node.outputs.parameters.length > 0)
-    .map((node: any) => ({
-      taskName: node.displayName || node.name,
-      outputs: node.outputs.parameters.map((p: any) => p.value)
-    }));
-};
-
-  // Streaming functions
-  const startWorkflowEventStream = useCallback((workflowName: string) => {
-    if (eventStream) {
-      eventStream.close();
-    }
-
-    const newEventStream = new WorkflowEventStream();
-    setEventStream(newEventStream);
+  const startWatchingWorkflow = useCallback((workflowName: string) => {
     setIsStreaming(true);
-    setWorkflowEvents([]); // Clear previous events
+    setCurrentWorkflowStatus(null);
 
-    const cleanup = newEventStream.streamWorkflowEvents(
+    const cleanup = argoClient.watchWorkflow(
       workflowName,
-      (event: WorkflowEvent) => {
-        console.log('Received workflow event:', event);
-
-        const outputs = getWorkflowOutputs(event.object);
-        console.log('Workflow outputs:', outputs);
-        
-        // Update the current workflow outputs
-        setCurrentWorkflowOutputs(outputs);
-
-        setWorkflowEvents(prev => [...prev, event]);
-        
-        // We're no longer auto-updating the workflows list from streaming events
+      (status: WorkflowStatus) => {
+        console.log('Received workflow status:', status);
+        setCurrentWorkflowStatus(status);
       },
       (error: Event) => {
         console.error('Workflow event stream error:', error);
@@ -208,20 +176,20 @@ const WorkflowManager: React.FC = () => {
       () => {
         console.log('Workflow event stream connected');
         setError(null);
+      },
+      () => {
+        console.log('Stream auto-closed due to workflow completion');
+        setIsStreaming(false);
       }
     );
 
-    // Return cleanup function directly since streamWorkflowEvents returns it synchronously
     return cleanup;
-  }, [eventStream]);
+  }, []);
 
-  const stopWorkflowEventStream = useCallback(() => {
-    if (eventStream) {
-      eventStream.close();
-      setEventStream(null);
-    }
+  const stopWatchingWorkflow = useCallback(() => {
+    argoClient.stopWatchingWorkflow();
     setIsStreaming(false);
-  }, [eventStream]);
+  }, []);
 
 
 
@@ -261,12 +229,11 @@ const WorkflowManager: React.FC = () => {
         )}
       </div>
 
-      {/* Streaming Controls */}
       <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px', borderRadius: '8px' }}>
         <h2>Real-time Workflow Events</h2>
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '10px' }}>
           <button
-            onClick={() => startWorkflowEventStream("")}
+            onClick={() => startWatchingWorkflow("")}
             disabled={isStreaming}
             style={{
               padding: '10px 15px',
@@ -280,7 +247,7 @@ const WorkflowManager: React.FC = () => {
             {isStreaming ? 'Streaming Active' : 'Start Streaming'}
           </button>
           <button
-            onClick={stopWorkflowEventStream}
+            onClick={stopWatchingWorkflow}
             disabled={!isStreaming}
             style={{
               padding: '10px 15px',
@@ -304,8 +271,7 @@ const WorkflowManager: React.FC = () => {
           </span>
         </div>
         
-        {/* Current Workflow Outputs */}
-        {workflowEvents.length > 0 && workflowEvents[workflowEvents.length-1].object && workflowEvents[workflowEvents.length-1].object.metadata && (
+        {currentWorkflowStatus && (
           <div style={{ marginTop: '15px' }}>
             <div style={{ 
               marginBottom: '10px', 
@@ -315,17 +281,17 @@ const WorkflowManager: React.FC = () => {
               justifyContent: 'center',
               fontSize: '16px'
             }}>
-              Workflow: {workflowEvents[workflowEvents.length-1].object.metadata.name || 'Unknown'}
-              {workflowEvents[workflowEvents.length-1].object.status?.phase && (
+              Workflow: {currentWorkflowStatus.name}
+              {currentWorkflowStatus.phase && (
                 <span style={{ 
                   marginLeft: '10px', 
                   padding: '3px 8px', 
                   borderRadius: '4px',
-                  backgroundColor: getPhaseColor(workflowEvents[workflowEvents.length-1].object.status?.phase || ''),
+                  backgroundColor: getPhaseColor(currentWorkflowStatus.phase),
                   color: 'white',
                   fontSize: '12px'
                 }}>
-                  {workflowEvents[workflowEvents.length-1].object.status?.phase}
+                  {currentWorkflowStatus.phase}
                 </span>
               )}
             </div>
@@ -337,27 +303,32 @@ const WorkflowManager: React.FC = () => {
               overflowY: 'auto',
               padding: '15px'
             }}>
-              {currentWorkflowOutputs.length === 0 ? (
-                <div style={{ padding: '20px', textAlign: 'center', color: '#6c757d' }}>
-                  No task outputs available yet.
-                </div>
-              ) : (
-                <div className="workflow-outputs">
-                  {currentWorkflowOutputs.map((task, index) => (
-                    <div key={index} style={{ 
-                      padding: '15px',
-                      margin: '0 0 15px 0',
-                      backgroundColor: 'white',
-                      borderRadius: '6px',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24)',
-                    }}>
+              {(() => {
+                if (currentWorkflowStatus.nodes.length === 0) return (
+                  <div style={{ padding: '20px', textAlign: 'center', color: '#6c757d' }}>
+                    No tasks available yet.
+                  </div>
+                );
+                
+                return (
+                  <div className="workflow-tasks">
+                    {currentWorkflowStatus.nodes.map((node, index) => (
+                      <div key={index} style={{ 
+                        padding: '15px',
+                        margin: '0 0 15px 0',
+                        backgroundColor: 'white',
+                        borderRadius: '6px',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24)',
+                      }}>
                       <div style={{ 
                         fontWeight: 'bold', 
                         padding: '0 0 8px 0',
                         borderBottom: '1px solid #eee',
                         marginBottom: '12px',
                         fontSize: '16px',
-                        color: '#333'
+                        color: '#333',
+                        display: 'flex',
+                        alignItems: 'center'
                       }}>
                         <span style={{
                           backgroundColor: '#007bff',
@@ -367,7 +338,17 @@ const WorkflowManager: React.FC = () => {
                           marginRight: '8px',
                           fontSize: '14px'
                         }}>Task</span>
-                        {task.taskName}
+                        {node.name}
+                        <span style={{ 
+                          marginLeft: '10px', 
+                          padding: '2px 6px', 
+                          borderRadius: '3px',
+                          backgroundColor: getPhaseColor(node.phase),
+                          color: 'white',
+                          fontSize: '11px'
+                        }}>
+                          {node.phase}
+                        </span>
                       </div>
                       <div>
                         <div style={{
@@ -378,25 +359,39 @@ const WorkflowManager: React.FC = () => {
                         }}>
                           Outputs:
                         </div>
-                        {task.outputs.map((output, i) => (
-                          <div key={i} style={{ 
+                        {node.outputs.length === 0 ? (
+                          <div style={{ 
                             padding: '8px 12px',
                             backgroundColor: '#f8f9fa',
                             borderRadius: '4px',
-                            marginBottom: '8px',
-                            fontFamily: 'monospace',
-                            fontSize: '13px',
-                            wordBreak: 'break-all',
+                            fontStyle: 'italic',
+                            color: '#6c757d',
                             border: '1px solid #e9ecef'
                           }}>
-                            {output}
+                            No outputs available yet
                           </div>
-                        ))}
+                        ) : (
+                          node.outputs.map((output: string, i: number) => (
+                            <div key={i} style={{ 
+                              padding: '8px 12px',
+                              backgroundColor: '#f8f9fa',
+                              borderRadius: '4px',
+                              marginBottom: '8px',
+                              fontFamily: 'monospace',
+                              fontSize: '13px',
+                              wordBreak: 'break-all',
+                              border: '1px solid #e9ecef'
+                            }}>
+                              {output}
+                            </div>
+                          ))
+                        )}
                       </div>
                     </div>
                   ))}
-                </div>
-              )}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}
@@ -452,7 +447,7 @@ const WorkflowManager: React.FC = () => {
           </button>
           <button 
             onClick={handleDeleteAllWorkflows} 
-            disabled={loading || workflows.length === 0} 
+            disabled={loading || argoResponse.length === 0} 
             style={{ 
               padding: '10px 15px', 
               backgroundColor: '#dc3545', 
@@ -460,7 +455,7 @@ const WorkflowManager: React.FC = () => {
               border: 'none', 
               borderRadius: '5px', 
               cursor: 'pointer', 
-              opacity: workflows.length === 0 ? 0.6 : 1
+              opacity: argoResponse.length === 0 ? 0.6 : 1
             }}
           >
             Delete All Workflows
@@ -468,10 +463,10 @@ const WorkflowManager: React.FC = () => {
         </div>
       </div>
       {loading && <p>Loading workflows...</p>}
-      {!loading && workflows.length === 0 && <p>No workflows found in the argo namespace.</p>}
-      {!loading && workflows.length > 0 && (
+      {!loading && argoResponse.length === 0 && <p>No workflows found in the argo namespace.</p>}
+      {!loading && argoResponse.length > 0 && (
         <ul style={{ listStyleType: 'none', padding: 0 }}>
-          {workflows.map((wf) => (
+          {argoResponse.map((wf) => (
             <li key={wf.metadata.name} style={{ border: '1px solid #eee', padding: '10px', marginBottom: '10px', borderRadius: '5px' }}>
               <div>
                 <strong>Name:</strong> {wf.metadata.name} <br />
@@ -483,17 +478,14 @@ const WorkflowManager: React.FC = () => {
                 }}>
                   {wf.status?.phase || 'N/A'}
                 </span> <br />
-                <strong>Started:</strong> {wf.status?.startedAt ? new Date(wf.status.startedAt).toLocaleString() : 'N/A'} <br />
-                {wf.status?.finishedAt && <><strong>Finished:</strong> {new Date(wf.status.finishedAt).toLocaleString()} <br /></>}
                 
                 {wf.status?.nodes && (
                 <div style={{ marginTop: '10px' }}>
                   <strong>Tasks:</strong>
                   <ul style={{ marginTop: '5px', paddingLeft: '20px' }}>
                     {Object.values(wf.status.nodes)
-                      .filter(node => node.type === 'Pod' || node.type === 'Container')
-                      .map((node) => (
-                        <li key={node.id} style={{ 
+                      .map((node:any) => (
+                        <li key={node.name} style={{ 
                           marginBottom: '10px', 
                           padding: '8px', 
                           borderRadius: '4px',
@@ -502,7 +494,7 @@ const WorkflowManager: React.FC = () => {
                                         node.phase === 'Running' ? '#f0f0ff' : '#f5f5f5',
                           border: node.phase === 'Running' ? '1px solid #b8d4f5' : '1px solid #ddd'
                         }}>
-                          <div style={{ fontWeight: 'bold' }}>{node.displayName || node.name}</div>
+                          <div style={{ fontWeight: 'bold' }}>{node.name}</div>
                           <div style={{ 
                             fontSize: '13px', 
                             color: node.phase === 'Succeeded' ? '#28a745' : 
@@ -526,10 +518,7 @@ const WorkflowManager: React.FC = () => {
                             Status: {node.phase}
                             {node.phase === 'Running' && ' (Updating live...)'}
                           </div>
-                          {node.startedAt && <div style={{ fontSize: '12px' }}>Started: {new Date(node.startedAt).toLocaleString()}</div>}
-                          {node.finishedAt && <div style={{ fontSize: '12px' }}>Finished: {new Date(node.finishedAt).toLocaleString()}</div>}
                           
-                          {/* For running nodes, show a progress indicator */}
                           {node.phase === 'Running' && (
                             <div style={{ 
                               marginTop: '5px',
