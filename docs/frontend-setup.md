@@ -31,7 +31,7 @@ cd vis-workflow-exec
 
 ### 2. Install Dependencies
 ```bash
-npm install
+npm install --legacy-peer-deps
 ```
 
 ### 3. Start Development Server

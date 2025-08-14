@@ -37,7 +37,13 @@ bash setupDev.sh
 - Sets up the Argo server in development mode (authentication disabled)
 - Establishes port forwarding to access the Argo API locally
 
-> **⚠️ Important**: Keep the terminal session open after running the script. The port forwarding will stop if you close it.
+> **⚠️ Important**: Keep the terminal session open after running the script. The port forwarding will stop if you close it. 
+
+> **⚠️ If the terminal is closed, restart port forwarding with:**
+```bash
+kubectl -n argo port-forward deployment/argo-server 2746:2746 &
+PORT_FORWARD_PID=$!
+```
 
 ## Access Points
 
@@ -77,5 +83,6 @@ pkill -f "port-forward"
 kubectl delete namespace argo
 ```
 ---
+
 
 **Ready to develop! 🚀**
