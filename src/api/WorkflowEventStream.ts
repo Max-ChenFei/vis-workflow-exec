@@ -1,13 +1,14 @@
 import { WorkflowResponse } from '../types/argo';
 
 export interface WorkflowEvent {
-  type: string;
-  object: WorkflowResponse;
+    type: string;
+    object: WorkflowResponse;
 }
 
 export class WorkflowEventStream {
   private eventSource: EventSource | null = null;
   private authToken: string;
+  private currentWorkflowName: string | null = null;
 
   constructor(authToken: string) {
     this.authToken = authToken;
@@ -16,6 +17,7 @@ export class WorkflowEventStream {
   // Stream workflow events for a specific namespace
   streamWorkflowEvents(
     namespace: string,
+    workflowName: string,
     onEvent: (event: WorkflowEvent) => void,
     onError?: (error: Event) => void,
     onOpen?: () => void
@@ -25,7 +27,7 @@ export class WorkflowEventStream {
 
     // Try the standard Argo workflow events endpoint
     // Note: EventSource doesn't support Authorization headers, so this might not work with auth
-    const url = `/api/v1/workflow-events/${namespace}?watch=true`;
+    const url = `/api/v1/workflow-events/${encodeURIComponent(namespace)}`+`?listOptions.fieldSelector=${encodeURIComponent(`metadata.name=${workflowName}`)}`+`&listOptions.resourceVersion=0`;
 
     console.log('Connecting to EventSource:', url);
     
@@ -45,15 +47,14 @@ export class WorkflowEventStream {
           return;
         }
 
-        const workflowEvent: WorkflowEvent = JSON.parse(event.data);
-        
+        const workflowEvent: WorkflowEvent = JSON.parse(event.data).result;
+      
         // Validate that the event has the required structure
         if (!workflowEvent || !workflowEvent.object || !workflowEvent.object.metadata) {
           console.log('Skipping invalid event structure:', workflowEvent);
           return;
         }
 
-        console.log('Parsed workflow event:', workflowEvent);
         onEvent(workflowEvent);
       } catch (error) {
         console.error('Error parsing workflow event:', error, 'Raw data:', event.data);
@@ -74,6 +75,7 @@ export class WorkflowEventStream {
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;
+      this.currentWorkflowName = null;
     }
   }
 }

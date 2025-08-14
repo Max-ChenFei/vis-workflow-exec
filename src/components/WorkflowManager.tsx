@@ -14,7 +14,6 @@ const buildSampleWorkflow = (ns: string, sa: string): WorkflowManifest => ({
   },
   spec: {
     entrypoint: 'dag-pipeline',
-    serviceAccountName: sa,
     templates: [
       {
         name: 'dag-pipeline',
@@ -96,6 +95,7 @@ const WorkflowManager: React.FC = () => {
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [workflowEvents, setWorkflowEvents] = useState<WorkflowEvent[]>([]);
   const [eventStream, setEventStream] = useState<WorkflowEventStream | null>(null);
+  const [currentWorkflowOutputs, setCurrentWorkflowOutputs] = useState<Array<{taskName: string, outputs: string[]}>>([]);
 
 
   const listWorkflows = useCallback(async () => {
@@ -117,28 +117,6 @@ const WorkflowManager: React.FC = () => {
     argoClient.setAuthToken(authToken);
   }, [authToken]);
 
-//   useEffect(() => {
-//   fetch('/api/v1/workflows/argo', {
-//   method: 'GET',
-//   headers: {
-//     'Authorization': 'Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6ImsyYUMyeXMybGdoeENWUDBxWjNHZGNvUUg5ZjBoM2RKYmJSTWZua3d3MkUifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJhcmdvIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6ImFyZ28td29ya2Zsb3ctYXBpLXVzZXItdG9rZW4iLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoiYXJnby13b3JrZmxvdy1hcGktdXNlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6IjAwNjdlNDA0LTU3NjgtNDk1Ny04ODhjLTAxMTVmMWUzMjhlMyIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDphcmdvOmFyZ28td29ya2Zsb3ctYXBpLXVzZXIifQ.VDuW2Enn5kaAQ0S2QcQ3Z2_LCxQQvqisiIyM_snlGKstc4BhAg78nasxteugPFZdyt9pq6ghSCnm512M8FBGusFCYzQAeQqq-ZEfN0yDxfasyDrk3s7jmwBrAAmDAEVp2vh2xoHuBHgo67yQG617Y3RUqdnAMgiEYLl4wwd4lYOHQfYGhy7v3eB5Cdwva7KEOW4G_3bW5RJ7z1iz3o-of_3aDOp06JBSdlYN1sNT4Dqm4AV5ocBvhnIwlKZFsU44dcIUoCuv7VmcON55ZM3D_9pLtanNEUMFjhiAirjkRHKJKaYUINER-aFN-FurfDJBrJ4WBgEC0N-iEkVXiSf6MQ',
-//     'Content-Type': 'application/json'
-//   }
-// })
-// .then(response => {
-//   if (!response.ok) {
-//     throw new Error('Network response was not ok: ' + response.statusText);
-//   }
-//   return response.json(); // Parse the response as JSON
-// })
-// .then(data => {
-//   console.log('Response data:', data); // Log the data to the console
-// })
-// .catch(error => {
-//   console.error('There was a problem with the fetch operation:', error); // Handle errors here
-// });
-
-//   }, []);
 
   // Handle health check button click
   const handleHealthCheck = async (namespace: string) => {
@@ -163,6 +141,7 @@ const WorkflowManager: React.FC = () => {
       const parsedManifest: WorkflowManifest = JSON.parse(workflowToSubmit);
       const submittedWorkflow = await argoClient.submitWorkflow(parsedManifest, namespace);
       const fullName = submittedWorkflow.metadata.name!;
+      startWorkflowEventStream(fullName);
       console.log(`Workflow ${fullName} submitted successfully!`);         
     } catch (err: any) {
       console.error('Submit workflow error:', err);
@@ -200,8 +179,19 @@ const WorkflowManager: React.FC = () => {
     }
   };
 
+  const getWorkflowOutputs = (workflow: WorkflowResponse) => {
+  if (!workflow.status?.nodes) return [];
+
+  return Object.values(workflow.status.nodes)
+    .filter((node: any) => node.outputs?.parameters && node.outputs.parameters.length > 0)
+    .map((node: any) => ({
+      taskName: node.displayName || node.name,
+      outputs: node.outputs.parameters.map((p: any) => p.value)
+    }));
+};
+
   // Streaming functions
-  const startWorkflowEventStream = useCallback(() => {
+  const startWorkflowEventStream = useCallback((workflowName: string) => {
     if (eventStream) {
       eventStream.close();
     }
@@ -213,34 +203,19 @@ const WorkflowManager: React.FC = () => {
 
     const cleanup = newEventStream.streamWorkflowEvents(
       namespace,
+      workflowName,
       (event: WorkflowEvent) => {
         console.log('Received workflow event:', event);
+
+        const outputs = getWorkflowOutputs(event.object);
+        console.log('Workflow outputs:', outputs);
         
-        // Validate event before processing
-        if (!event || !event.object || !event.object.metadata) {
-          console.warn('Skipping invalid event:', event);
-          return;
-        }
+        // Update the current workflow outputs
+        setCurrentWorkflowOutputs(outputs);
 
         setWorkflowEvents(prev => [...prev, event]);
         
-        // Update workflows list with the latest event
-        if (event.type === 'ADDED' || event.type === 'MODIFIED') {
-          setWorkflows(prev => {
-            const existingIndex = prev.findIndex(w => w.metadata.uid === event.object.metadata.uid);
-            if (existingIndex >= 0) {
-              // Update existing workflow
-              const updated = [...prev];
-              updated[existingIndex] = event.object;
-              return updated;
-            } else {
-              // Add new workflow
-              return [...prev, event.object];
-            }
-          });
-        } else if (event.type === 'DELETED') {
-          setWorkflows(prev => prev.filter(w => w.metadata.uid !== event.object.metadata.uid));
-        }
+        // We're no longer auto-updating the workflows list from streaming events
       },
       (error: Event) => {
         console.error('Workflow event stream error:', error);
@@ -264,22 +239,6 @@ const WorkflowManager: React.FC = () => {
     }
     setIsStreaming(false);
   }, [eventStream]);
-
-  // Initialize event stream when component mounts
-  useEffect(() => {
-    let cleanup: (() => void) | undefined;
-    
-    if (authToken && namespace) {
-      cleanup = startWorkflowEventStream();
-    }
-
-    return () => {
-      if (cleanup) {
-        cleanup();
-      }
-      stopWorkflowEventStream();
-    };
-  }, [authToken, namespace]); // Remove startWorkflowEventStream and stopWorkflowEventStream from dependencies to avoid infinite loop
 
 
 
@@ -354,7 +313,7 @@ const WorkflowManager: React.FC = () => {
         <h2>Real-time Workflow Events</h2>
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '10px' }}>
           <button
-            onClick={startWorkflowEventStream}
+            onClick={() => startWorkflowEventStream("")}
             disabled={isStreaming}
             style={{
               padding: '10px 15px',
@@ -392,56 +351,113 @@ const WorkflowManager: React.FC = () => {
           </span>
         </div>
         
-        {/* Event Log */}
-        <div style={{ marginTop: '15px' }}>
-          <h3>Recent Events ({workflowEvents.length})</h3>
-          <div style={{ 
-            maxHeight: '200px', 
-            overflowY: 'auto', 
-            border: '1px solid #ddd', 
-            padding: '10px',
-            backgroundColor: '#f8f9fa',
-            fontFamily: 'monospace',
-            fontSize: '12px'
-          }}>
-            {workflowEvents
-              .filter(event => event && event.object && event.object.metadata) // Filter out invalid events
-              .slice(-20)
-              .map((event, index) => (
-              <div key={index} style={{ marginBottom: '5px', padding: '5px', borderBottom: '1px solid #eee' }}>
-                <strong>[{event.type}]</strong> {event.object.metadata.name || 'Unknown'} 
-                {event.object.status?.phase && (
-                  <span style={{ 
-                    marginLeft: '10px', 
-                    padding: '2px 6px', 
-                    borderRadius: '3px',
-                    backgroundColor: getPhaseColor(event.object.status.phase),
-                    color: 'white',
-                    fontSize: '10px'
-                  }}>
-                    {event.object.status.phase}
-                  </span>
-                )}
-              </div>
-            ))}
-            {workflowEvents.filter(event => event && event.object && event.object.metadata).length === 0 && (
-              <div style={{ color: '#6c757d', textAlign: 'center', padding: '20px' }}>
-                No events yet. Start streaming to see workflow events in real-time.
-              </div>
-            )}
+        {/* Current Workflow Outputs */}
+        {workflowEvents.length > 0 && workflowEvents[workflowEvents.length-1].object && workflowEvents[workflowEvents.length-1].object.metadata && (
+          <div style={{ marginTop: '15px' }}>
+            <div style={{ 
+              marginBottom: '10px', 
+              fontWeight: 'bold', 
+              display: 'flex', 
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: '16px'
+            }}>
+              Workflow: {workflowEvents[workflowEvents.length-1].object.metadata.name || 'Unknown'}
+              {workflowEvents[workflowEvents.length-1].object.status?.phase && (
+                <span style={{ 
+                  marginLeft: '10px', 
+                  padding: '3px 8px', 
+                  borderRadius: '4px',
+                  backgroundColor: getPhaseColor(workflowEvents[workflowEvents.length-1].object.status?.phase || ''),
+                  color: 'white',
+                  fontSize: '12px'
+                }}>
+                  {workflowEvents[workflowEvents.length-1].object.status?.phase}
+                </span>
+              )}
+            </div>
+            <div style={{ 
+              border: '1px solid #ddd', 
+              borderRadius: '5px',
+              backgroundColor: '#f8f9fa',
+              maxHeight: '400px',
+              overflowY: 'auto',
+              padding: '15px'
+            }}>
+              {currentWorkflowOutputs.length === 0 ? (
+                <div style={{ padding: '20px', textAlign: 'center', color: '#6c757d' }}>
+                  No task outputs available yet.
+                </div>
+              ) : (
+                <div className="workflow-outputs">
+                  {currentWorkflowOutputs.map((task, index) => (
+                    <div key={index} style={{ 
+                      padding: '15px',
+                      margin: '0 0 15px 0',
+                      backgroundColor: 'white',
+                      borderRadius: '6px',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24)',
+                    }}>
+                      <div style={{ 
+                        fontWeight: 'bold', 
+                        padding: '0 0 8px 0',
+                        borderBottom: '1px solid #eee',
+                        marginBottom: '12px',
+                        fontSize: '16px',
+                        color: '#333'
+                      }}>
+                        <span style={{
+                          backgroundColor: '#007bff',
+                          color: 'white',
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          marginRight: '8px',
+                          fontSize: '14px'
+                        }}>Task</span>
+                        {task.taskName}
+                      </div>
+                      <div>
+                        <div style={{
+                          fontWeight: 'bold',
+                          marginBottom: '8px',
+                          fontSize: '14px',
+                          color: '#555'
+                        }}>
+                          Outputs:
+                        </div>
+                        {task.outputs.map((output, i) => (
+                          <div key={i} style={{ 
+                            padding: '8px 12px',
+                            backgroundColor: '#f8f9fa',
+                            borderRadius: '4px',
+                            marginBottom: '8px',
+                            fontFamily: 'monospace',
+                            fontSize: '13px',
+                            wordBreak: 'break-all',
+                            border: '1px solid #e9ecef'
+                          }}>
+                            {output}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px', borderRadius: '8px' }}>
-  <h2>Submit New Workflow</h2>
+        <h2>Submit New Workflow</h2>
         <textarea
           value={workflowToSubmit}
           onChange={(e) => setWorkflowToSubmit(e.target.value)}
           rows={15}
           style={{ width: '100%', padding: '10px', marginBottom: '10px', boxSizing: 'border-box', fontFamily: 'monospace' }}
         ></textarea>
-  <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
           <button
             type="button"
             onClick={handleFreshWorkflow}
