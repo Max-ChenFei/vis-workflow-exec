@@ -1,6 +1,16 @@
-# Getting Started with Create React App
+# vis-workflow-exec
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A React TypeScript application that provides a visual interface for managing and monitoring Argo Workflows.
+
+## Quick Start
+
+### Prerequisites
+- Local Kubernetes cluster with Argo Workflows
+- Node.js (v16+) and npm
+
+### Setup
+1. **Backend Setup**: Follow the [Kubernetes & Argo Setup Guide](./docs/k8s-setup.md)
+2. **Frontend Setup**: Follow the [Frontend Development Guide](./docs/frontend-setup.md)
 
 ## Available Scripts
 
@@ -68,3 +78,38 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/d
 ### `npm run build` fails to minify
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+
+## Project Overview
+
+This React TypeScript application provides a visual interface for Argo Workflows, enabling:
+
+- **Workflow Management**: Submit, monitor, and manage workflow executions
+- **Real-time Updates**: Live monitoring of workflow status and logs
+- **Visual Interface**: User-friendly UI for complex workflow operations
+- **API Integration**: Direct integration with Argo Workflows REST API
+
+## Documentation
+
+- 📚 [Kubernetes & Argo Setup Guide](./docs/k8s-setup.md) - Set up the backend infrastructure
+- 🔧 [Frontend Development Guide](./docs/frontend-setup.md) - Set up the React development environment
+- 📝 [Workflow Examples](./test/) - Sample workflows for testing
+
+## Architecture
+
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   React App     │    │   Argo Server    │    │   Kubernetes    │
+│  (Frontend)     │◄──►│   (REST API)     │◄──►│   (Workflows)   │
+│  localhost:3000 │    │  localhost:2746  │    │                 │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+```
+
+## Contributing
+
+1. Follow the setup guides to prepare your development environment
+2. Make changes and test locally
+3. Submit a pull request with clear description of changes
+
+---
+
+**Built with React + TypeScript + Argo Workflows**
