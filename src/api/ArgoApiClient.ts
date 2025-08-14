@@ -1,17 +1,10 @@
 import { WorkflowResponse, ApiResponse } from '../types/argo';
 
 class ArgoApiClient {
-  private authToken: string | null;
   private namespace: string;
-
-  constructor( authToken: string | null = null, defaultNamespace: string = 'default') {
-    this.authToken = authToken;
+  
+  constructor(defaultNamespace: string = 'default') {
     this.namespace = defaultNamespace;
-  }
-
-  public setAuthToken(token: string): void {
-    token = token.trim();
-    this.authToken = token;
   }
 
   private async request<T>(
@@ -21,9 +14,6 @@ class ArgoApiClient {
     expectJson: boolean = true
   ): Promise<T> {
     const headers: HeadersInit = {};
-    if (this.authToken) {
-      headers['Authorization'] = `Bearer ${this.authToken}`;
-    }
     headers['Accept'] = 'application/json';
     const config: RequestInit = {
       method: method,

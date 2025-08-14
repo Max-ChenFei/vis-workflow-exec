@@ -7,12 +7,7 @@ export interface WorkflowEvent {
 
 export class WorkflowEventStream {
   private eventSource: EventSource | null = null;
-  private authToken: string;
   private currentWorkflowName: string | null = null;
-
-  constructor(authToken: string) {
-    this.authToken = authToken;
-  }
 
   // Stream workflow events for a specific namespace
   streamWorkflowEvents(
@@ -27,7 +22,7 @@ export class WorkflowEventStream {
 
     // Try the standard Argo workflow events endpoint
     // Note: EventSource doesn't support Authorization headers, so this might not work with auth
-    const url = `/api/v1/workflow-events/${encodeURIComponent(namespace)}`+`?listOptions.fieldSelector=${encodeURIComponent(`metadata.name=${workflowName}`)}`+`&listOptions.resourceVersion=0`;
+    const url = `/api/v1/workflow-events/${encodeURIComponent(namespace)}?listOptions.fieldSelector=${encodeURIComponent(`metadata.name=${workflowName}`)}&listOptions.resourceVersion=0`;
 
     console.log('Connecting to EventSource:', url);
     

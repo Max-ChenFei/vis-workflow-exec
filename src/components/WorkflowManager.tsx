@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import ArgoApiClient from '../api/ArgoApiClient';
 import { WorkflowEventStream, WorkflowEvent } from '../api/WorkflowEventStream';
 import { WorkflowManifest, WorkflowResponse } from '../types/argo';
@@ -85,7 +85,6 @@ const WorkflowManager: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [serviceAccountName, setServiceAccountName] = useState<string>('argo-workflow');
-  const [authToken, setAuthToken] = useState<string>('');
   const [namespace, setNamespace] = useState<string>('argo');
   const [workflowToSubmit, setWorkflowToSubmit] = useState<string>(
     JSON.stringify(buildSampleWorkflow('argo', 'argo-workflow'), null, 2)
@@ -112,11 +111,6 @@ const WorkflowManager: React.FC = () => {
       setLoading(false);
     }
   }, [namespace]);
-
-  useEffect(() => {
-    argoClient.setAuthToken(authToken);
-  }, [authToken]);
-
 
   // Handle health check button click
   const handleHealthCheck = async (namespace: string) => {
@@ -196,7 +190,7 @@ const WorkflowManager: React.FC = () => {
       eventStream.close();
     }
 
-    const newEventStream = new WorkflowEventStream(authToken);
+    const newEventStream = new WorkflowEventStream();
     setEventStream(newEventStream);
     setIsStreaming(true);
     setWorkflowEvents([]); // Clear previous events
@@ -230,7 +224,7 @@ const WorkflowManager: React.FC = () => {
 
     // Return cleanup function directly since streamWorkflowEvents returns it synchronously
     return cleanup;
-  }, [authToken, namespace, eventStream]);
+  }, [namespace, eventStream]);
 
   const stopWorkflowEventStream = useCallback(() => {
     if (eventStream) {
@@ -253,16 +247,6 @@ const WorkflowManager: React.FC = () => {
             value={serviceAccountName}
             onChange={(e) => setServiceAccountName(e.target.value)}
             placeholder="Enter ServiceAccount (default: argo-workflow)"
-            style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
-          />
-        </div>
-        <div style={{ marginBottom: '10px' }}>
-          <label style={{ display: 'block', marginBottom: '5px' }}>Auth Token (Bearer):</label>
-          <input
-            type="text"
-            value={authToken}
-            onChange={(e) => setAuthToken(e.target.value)}
-            placeholder="Enter Argo API Token"
             style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
           />
         </div>
