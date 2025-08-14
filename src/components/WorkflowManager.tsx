@@ -5,12 +5,12 @@ import { WorkflowManifest, WorkflowResponse } from '../types/argo';
 
 const argoClient = new ArgoApiClient();
 
-const buildSampleWorkflow = (ns: string): WorkflowManifest => ({
+const buildSampleWorkflow = (): WorkflowManifest => ({
   apiVersion: 'argoproj.io/v1alpha1',
   kind: 'Workflow',
   metadata: {
     generateName: 'dag-pipeline-',
-    namespace: ns,
+    namespace: 'argo', // not changed
   },
   spec: {
     entrypoint: 'dag-pipeline',
@@ -85,13 +85,13 @@ const WorkflowManager: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [workflowToSubmit, setWorkflowToSubmit] = useState<string>(
-    JSON.stringify(buildSampleWorkflow('argo'), null, 2)
+    JSON.stringify(buildSampleWorkflow(), null, 2)
   );
-  const [taskOutputs, setTaskOutputs] = useState<{ [taskName: string]: string }>({});
   const [healthStatus, setHealthStatus] = useState<{ isHealthy: boolean; error?: string, status?: number } | null>(null);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
-  const [workflowEvents, setWorkflowEvents] = useState<WorkflowEvent[]>([]);
   const [eventStream, setEventStream] = useState<WorkflowEventStream | null>(null);
+  // received workflow events after streaming starts
+  const [workflowEvents, setWorkflowEvents] = useState<WorkflowEvent[]>([]);
   const [currentWorkflowOutputs, setCurrentWorkflowOutputs] = useState<Array<{taskName: string, outputs: string[]}>>([]);
 
 
@@ -110,7 +110,6 @@ const WorkflowManager: React.FC = () => {
     }
   }, []);
 
-  // Handle health check button click
   const handleHealthCheck = async () => {
     setLoading(true);
     try {
@@ -123,8 +122,6 @@ const WorkflowManager: React.FC = () => {
     }
   };
 
-
-  
 
   const handleSubmitWorkflow = async () => {
     setLoading(true);
@@ -557,20 +554,6 @@ const WorkflowManager: React.FC = () => {
                                   animation: 'progress 2s infinite ease-in-out'
                                 }}></div>
                               </div>
-                            </div>
-                          )}
-                          
-                          {taskOutputs[node.name] && (
-                            <div style={{ 
-                              marginTop: '5px', 
-                              padding: '5px', 
-                              backgroundColor: 'white', 
-                              borderRadius: '3px', 
-                              border: '1px solid #ddd',
-                              fontFamily: 'monospace',
-                              fontSize: '12px'
-                            }}>
-                              <strong>Output:</strong> {taskOutputs[node.name]}
                             </div>
                           )}
                         </li>
