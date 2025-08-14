@@ -5,7 +5,7 @@ import { WorkflowManifest, WorkflowResponse } from '../types/argo';
 
 const argoClient = new ArgoApiClient();
 
-const buildSampleWorkflow = (ns: string, sa: string): WorkflowManifest => ({
+const buildSampleWorkflow = (ns: string): WorkflowManifest => ({
   apiVersion: 'argoproj.io/v1alpha1',
   kind: 'Workflow',
   metadata: {
@@ -84,10 +84,8 @@ const WorkflowManager: React.FC = () => {
   const [workflows, setWorkflows] = useState<WorkflowResponse[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [serviceAccountName, setServiceAccountName] = useState<string>('argo-workflow');
-  const [namespace, setNamespace] = useState<string>('argo');
   const [workflowToSubmit, setWorkflowToSubmit] = useState<string>(
-    JSON.stringify(buildSampleWorkflow('argo', 'argo-workflow'), null, 2)
+    JSON.stringify(buildSampleWorkflow('argo'), null, 2)
   );
   const [taskOutputs, setTaskOutputs] = useState<{ [taskName: string]: string }>({});
   const [healthStatus, setHealthStatus] = useState<{ isHealthy: boolean; error?: string, status?: number } | null>(null);
@@ -101,7 +99,7 @@ const WorkflowManager: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await argoClient.listWorkflows(namespace);
+      const response = await argoClient.listWorkflows();
       const workflowsList = response.items || [];
       setWorkflows(workflowsList);
     } catch (err: any) {
@@ -110,13 +108,13 @@ const WorkflowManager: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [namespace]);
+  }, []);
 
   // Handle health check button click
-  const handleHealthCheck = async (namespace: string) => {
+  const handleHealthCheck = async () => {
     setLoading(true);
     try {
-      const result = await argoClient.checkHealth(namespace);
+      const result = await argoClient.checkHealth();
       setHealthStatus(result);
     } catch (err: any) {
       setHealthStatus({ isHealthy: false, error: err.msg, status: err.status });
@@ -133,7 +131,7 @@ const WorkflowManager: React.FC = () => {
     setError(null);
     try {
       const parsedManifest: WorkflowManifest = JSON.parse(workflowToSubmit);
-      const submittedWorkflow = await argoClient.submitWorkflow(parsedManifest, namespace);
+      const submittedWorkflow = await argoClient.submitWorkflow(parsedManifest);
       const fullName = submittedWorkflow.metadata.name!;
       startWorkflowEventStream(fullName);
       console.log(`Workflow ${fullName} submitted successfully!`);         
@@ -148,20 +146,15 @@ const WorkflowManager: React.FC = () => {
       setLoading(false);
     }
   };
-  // Fresh Workflow: 根据当前输入重置示例
-  const handleFreshWorkflow = () => {
-    const wf = buildSampleWorkflow(namespace.trim() || 'default', serviceAccountName.trim() || 'argo-workflow');
-    setWorkflowToSubmit(JSON.stringify(wf, null, 2));
-  };
 
   const handleDeleteAllWorkflows = async () => {
-    if (!window.confirm(`Are you sure you want to delete ALL workflows in namespace "${namespace}"?`)) {
+    if (!window.confirm(`Are you sure you want to delete ALL workflows in the argo namespace?`)) {
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const result = await argoClient.deleteAllWorkflows(namespace);
+      const result = await argoClient.deleteAllWorkflows();
       if (result.errors.length > 0) {
         setError(`Deleted ${result.deleted} workflows, but encountered ${result.errors.length} errors:\n${result.errors.join('\n')}`);
       }
@@ -196,7 +189,6 @@ const WorkflowManager: React.FC = () => {
     setWorkflowEvents([]); // Clear previous events
 
     const cleanup = newEventStream.streamWorkflowEvents(
-      namespace,
       workflowName,
       (event: WorkflowEvent) => {
         console.log('Received workflow event:', event);
@@ -224,7 +216,7 @@ const WorkflowManager: React.FC = () => {
 
     // Return cleanup function directly since streamWorkflowEvents returns it synchronously
     return cleanup;
-  }, [namespace, eventStream]);
+  }, [eventStream]);
 
   const stopWorkflowEventStream = useCallback(() => {
     if (eventStream) {
@@ -240,29 +232,9 @@ const WorkflowManager: React.FC = () => {
     <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
       <div style={{ marginBottom: '20px', border: '1px solid #ccc', padding: '15px', borderRadius: '8px' }}>
         <h2>Configuration</h2>
-        <div style={{ marginBottom: '10px' }}>
-          <label style={{ display: 'block', marginBottom: '5px' }}>Service Account Name:</label>
-          <input
-            type="text"
-            value={serviceAccountName}
-            onChange={(e) => setServiceAccountName(e.target.value)}
-            placeholder="Enter ServiceAccount (default: argo-workflow)"
-            style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
-          />
-        </div>
-        <div style={{ marginBottom: '10px' }}>
-          <label style={{ display: 'block', marginBottom: '5px' }}>Namespace:</label>
-          <input
-            type="text"
-            value={namespace}
-            onChange={(e) => setNamespace(e.target.value)}
-            placeholder="Enter Kubernetes Namespace"
-            style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
-          />
-        </div>
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center', marginBottom: '5px' }}>
           <button
-            onClick={() => handleHealthCheck(namespace)}
+            onClick={() => handleHealthCheck()}
             style={{
               padding: '10px 15px',
               backgroundColor: '#17a2b8',
@@ -442,20 +414,6 @@ const WorkflowManager: React.FC = () => {
           style={{ width: '100%', padding: '10px', marginBottom: '10px', boxSizing: 'border-box', fontFamily: 'monospace' }}
         ></textarea>
         <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
-          <button
-            type="button"
-            onClick={handleFreshWorkflow}
-            style={{
-              padding: '10px 15px',
-              backgroundColor: '#6c757d',
-              color: 'white',
-              border: 'none',
-              borderRadius: '5px',
-              cursor: 'pointer'
-            }}
-          >
-            Fresh Workflow
-          </button>
           <button onClick={handleSubmitWorkflow} disabled={loading} style={{ padding: '10px 15px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>
             {loading ? 'Submitting...' : 'Submit Workflow'}
           </button>
@@ -513,7 +471,7 @@ const WorkflowManager: React.FC = () => {
         </div>
       </div>
       {loading && <p>Loading workflows...</p>}
-      {!loading && workflows.length === 0 && <p>No workflows found in namespace "{namespace}".</p>}
+      {!loading && workflows.length === 0 && <p>No workflows found in the argo namespace.</p>}
       {!loading && workflows.length > 0 && (
         <ul style={{ listStyleType: 'none', padding: 0 }}>
           {workflows.map((wf) => (

@@ -3,7 +3,7 @@ import { WorkflowResponse, ApiResponse } from '../types/argo';
 class ArgoApiClient {
   private namespace: string;
   
-  constructor(defaultNamespace: string = 'default') {
+  constructor(defaultNamespace: string = 'argo') {
     this.namespace = defaultNamespace;
   }
 
@@ -48,8 +48,8 @@ class ArgoApiClient {
   
   }
 
-  public async checkHealth(namespace: string): Promise<{ isHealthy: boolean; error?: string, status?: number }> {
-    const path = `/api/v1/workflows/${namespace}?limit=1`;
+  public async checkHealth(): Promise<{ isHealthy: boolean; error?: string, status?: number }> {
+    const path = `/api/v1/workflows/${this.namespace}?limit=1`;
     try {
       const response = await this.request<WorkflowResponse>('GET', path, undefined, true);
       return { isHealthy: !!response };
@@ -59,10 +59,9 @@ class ArgoApiClient {
   }
   
   public async submitWorkflow(
-    workflowManifest:any,
-    namespace: string = this.namespace
+    workflowManifest:any
   ): Promise<WorkflowResponse> {
-    const path = `/api/v1/workflows/${namespace}`;    
+    const path = `/api/v1/workflows/${this.namespace}`;    
 
     const requestBody = {
       workflow: workflowManifest
@@ -72,21 +71,17 @@ class ArgoApiClient {
   }
 
 
-  public async listWorkflows(
-    namespace: string = this.namespace
-  ): Promise<ApiResponse<WorkflowResponse>> {
-    const path = `/api/v1/workflows/${namespace}`;
+  public async listWorkflows(): Promise<ApiResponse<WorkflowResponse>> {
+    const path = `/api/v1/workflows/${this.namespace}`;
     return this.request<ApiResponse<WorkflowResponse>>('GET', path);
   }
 
-  public async deleteAllWorkflows(
-    namespace: string = this.namespace
-  ): Promise<{ deleted: number; errors: string[] }> {
+  public async deleteAllWorkflows(): Promise<{ deleted: number; errors: string[] }> {
     const result = { deleted: 0, errors: [] as string[] };
     
     try {
       // First, list all workflows in the namespace
-      const response = await this.listWorkflows(namespace);
+      const response = await this.listWorkflows();
       
       if (!response.items || response.items.length === 0) {
         return result;
@@ -101,7 +96,7 @@ class ArgoApiClient {
         
         try {
           const name = workflow.metadata.name;
-          const path = `/api/v1/workflows/${namespace}/${name}`;
+          const path = `/api/v1/workflows/${this.namespace}/${name}`;
           await this.request<void>('DELETE', path);
           result.deleted++;
         } catch (error: any) {
